@@ -49,6 +49,42 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (args.size() == 4 && args.at(1) == QStringLiteral("--self-test-scroll")) {
+        bool okX = false;
+        bool okY = false;
+        const double dx = args.at(2).toDouble(&okX);
+        const double dy = args.at(3).toDouble(&okY);
+        if (!okX || !okY) {
+            qCritical() << "usage: hypr-kdeconnect-portal --self-test-scroll <dx> <dy>";
+            return 2;
+        }
+        hkcf::WaylandInput input;
+        if (!input.pointerAxis(dx, dy)) {
+            qCritical() << input.lastError();
+            return 1;
+        }
+        QThread::msleep(150);
+        return 0;
+    }
+
+    if (args.size() == 4 && args.at(1) == QStringLiteral("--self-test-scroll-discrete")) {
+        bool okAxis = false;
+        bool okSteps = false;
+        const uint axis = args.at(2).toUInt(&okAxis);
+        const int steps = args.at(3).toInt(&okSteps);
+        if (!okAxis || !okSteps) {
+            qCritical() << "usage: hypr-kdeconnect-portal --self-test-scroll-discrete <axis:0|1> <steps>";
+            return 2;
+        }
+        hkcf::WaylandInput input;
+        if (!input.pointerAxisDiscrete(axis, steps)) {
+            qCritical() << input.lastError();
+            return 1;
+        }
+        QThread::msleep(150);
+        return 0;
+    }
+
     auto bus = QDBusConnection::sessionBus();
     if (!bus.isConnected()) {
         qCritical() << "failed to connect to session bus";

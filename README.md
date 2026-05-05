@@ -176,6 +176,8 @@ the current Wayland session:
 ```sh
 hypr-kdeconnect-portal --self-test-motion 120 0
 hypr-kdeconnect-portal --self-test-absolute 1440 900
+hypr-kdeconnect-portal --self-test-scroll 0 120
+hypr-kdeconnect-portal --self-test-scroll-discrete 0 3
 ```
 
 On Hyprland, you can also check that the compositor sees the virtual devices:

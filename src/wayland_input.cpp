@@ -28,6 +28,7 @@ constexpr std::uint32_t kKeyboardKeymapFormatXkbV1 = 1;
 constexpr std::uint32_t kPointerAxisVertical = 0;
 constexpr std::uint32_t kPointerAxisHorizontal = 1;
 constexpr std::uint32_t kPointerAxisSourceWheel = 0;
+constexpr double kDiscreteStep = 15.0;
 
 } // namespace
 
@@ -297,12 +298,37 @@ bool WaylandInput::pointerAxis(double dx, double dy) {
     if (!ensureReady())
         return false;
 
+    zwlr_virtual_pointer_v1_axis_source(m_pointer, kPointerAxisSourceWheel);
     if (*safeDx != 0.0) {
         zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisHorizontal, wl_fixed_from_double(*safeDx));
     }
     if (*safeDy != 0.0) {
         zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisVertical, wl_fixed_from_double(*safeDy));
     }
+    zwlr_virtual_pointer_v1_frame(m_pointer);
+    return flush();
+}
+
+bool WaylandInput::pointerAxisDiscrete(std::uint32_t axis, int steps) {
+    if (!security::isAllowedDiscreteAxis(axis)) {
+        setError(QStringLiteral("invalid discrete pointer axis"));
+        return false;
+    }
+    if (!ensureReady())
+        return false;
+
+    const int boundedSteps = security::clampDiscreteScrollSteps(steps);
+    const auto pointerAxis = axis == 1 ? kPointerAxisHorizontal : kPointerAxisVertical;
+    if (boundedSteps == 0) {
+        zwlr_virtual_pointer_v1_axis_source(m_pointer, kPointerAxisSourceWheel);
+        zwlr_virtual_pointer_v1_axis_stop(m_pointer, timeMs(), pointerAxis);
+        zwlr_virtual_pointer_v1_frame(m_pointer);
+        return flush();
+    }
+
+    const double value = boundedSteps * kDiscreteStep;
+    zwlr_virtual_pointer_v1_axis_source(m_pointer, kPointerAxisSourceWheel);
+    zwlr_virtual_pointer_v1_axis_discrete(m_pointer, timeMs(), pointerAxis, wl_fixed_from_double(value), boundedSteps);
     zwlr_virtual_pointer_v1_frame(m_pointer);
     return flush();
 }

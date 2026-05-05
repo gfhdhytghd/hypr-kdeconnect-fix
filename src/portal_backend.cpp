@@ -460,9 +460,7 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
             connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid discrete axis")));
             return true;
         }
-        constexpr double kDiscreteStep = 15.0;
-        const int boundedSteps = security::clampDiscreteScrollSteps(*steps);
-        return sendInputResult(message, connection, m_input.pointerAxis(*axis == 1 ? boundedSteps * kDiscreteStep : 0.0, *axis == 0 ? boundedSteps * kDiscreteStep : 0.0));
+        return sendInputResult(message, connection, m_input.pointerAxisDiscrete(*axis, *steps));
     }
 
     if (member == QStringLiteral("NotifyKeyboardKeycode")) {
