@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <fcntl.h>
@@ -125,6 +126,12 @@ void configureRegion(eis_device* device, const QRect& bounds) {
                         static_cast<std::uint32_t>(std::max(1, bounds.height())));
     eis_region_add(region);
     eis_region_unref(region);
+}
+
+int wheelStep(double delta) {
+    if (!std::isfinite(delta) || delta == 0.0)
+        return 0;
+    return delta > 0.0 ? 1 : -1;
 }
 
 } // namespace
@@ -309,7 +316,10 @@ void EisInputBridge::handleInputEvent(eis_event* event) {
         m_input.pointerButton(eis_event_button_get_button(event), eis_event_button_get_is_press(event));
         break;
     case EIS_EVENT_SCROLL_DELTA:
-        m_input.pointerAxis(eis_event_scroll_get_dx(event), -eis_event_scroll_get_dy(event));
+        if (const int x = wheelStep(eis_event_scroll_get_dx(event)); x != 0)
+            m_input.pointerAxisDiscrete(1, x);
+        if (const int y = wheelStep(-eis_event_scroll_get_dy(event)); y != 0)
+            m_input.pointerAxisDiscrete(0, y);
         break;
     case EIS_EVENT_SCROLL_DISCRETE: {
         const int x = eis_event_scroll_get_discrete_dx(event);

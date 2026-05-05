@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <fcntl.h>
@@ -84,6 +85,14 @@ bool writeAll(int fd, const char* data, std::size_t size) {
         offset += static_cast<std::size_t>(written);
     }
     return true;
+}
+
+double normalizedAxisDelta(double value) {
+    if (value == 0.0)
+        return 0.0;
+    if (std::abs(value) < kDiscreteStep)
+        return std::copysign(kDiscreteStep, value);
+    return value;
 }
 
 } // namespace
@@ -298,12 +307,14 @@ bool WaylandInput::pointerAxis(double dx, double dy) {
     if (!ensureReady())
         return false;
 
+    const double dxOut = normalizedAxisDelta(*safeDx);
+    const double dyOut = normalizedAxisDelta(*safeDy);
     zwlr_virtual_pointer_v1_axis_source(m_pointer, kPointerAxisSourceWheel);
-    if (*safeDx != 0.0) {
-        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisHorizontal, wl_fixed_from_double(*safeDx));
+    if (dxOut != 0.0) {
+        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisHorizontal, wl_fixed_from_double(dxOut));
     }
-    if (*safeDy != 0.0) {
-        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisVertical, wl_fixed_from_double(*safeDy));
+    if (dyOut != 0.0) {
+        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisVertical, wl_fixed_from_double(dyOut));
     }
     zwlr_virtual_pointer_v1_frame(m_pointer);
     return flush();
