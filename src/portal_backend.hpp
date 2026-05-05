@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eis_input_bridge.hpp"
 #include "wayland_input.hpp"
 
 #include <QDBusConnection>
@@ -30,6 +31,7 @@ class PortalBackend : public QDBusVirtualObject {
         int eventsInRateWindow = 0;
         bool devicesSelected = false;
         bool started = false;
+        bool eisConnected = false;
     };
 
     static constexpr std::uint32_t kKeyboard = 1;
@@ -59,6 +61,7 @@ class PortalBackend : public QDBusVirtualObject {
 
     QHash<QString, Session> m_sessions;
     WaylandInput m_input;
+    EisInputBridge m_eis;
     QElapsedTimer m_rateTimer;
 };
 

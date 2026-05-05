@@ -12,6 +12,7 @@
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusReply>
+#include <QDBusUnixFileDescriptor>
 #include <QDBusVariant>
 #include <QDebug>
 
@@ -38,6 +39,11 @@ std::optional<T> typedArg(const QList<QVariant>& args, int index) {
     } else if constexpr (std::is_same_v<T, QVariantMap>) {
         if (args[index].canConvert<QVariantMap>())
             return args[index].toMap();
+        if (args[index].metaType() == QMetaType::fromType<QDBusArgument>()) {
+            QVariantMap map;
+            args[index].value<QDBusArgument>() >> map;
+            return map;
+        }
     } else if constexpr (std::is_same_v<T, QString>) {
         if (args[index].canConvert<QString>())
             return args[index].toString();
@@ -96,7 +102,8 @@ std::optional<double> boundedDoubleArg(const QList<QVariant>& args, int index, d
 } // namespace
 
 PortalBackend::PortalBackend(QObject* parent)
-    : QDBusVirtualObject(parent) {
+    : QDBusVirtualObject(parent)
+    , m_eis(m_input, this) {
     m_rateTimer.start();
 }
 
@@ -371,7 +378,44 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
     }
 
     if (member == QStringLiteral("ConnectToEIS")) {
-        connection.send(error(message, QString::fromLatin1(kNotSupported), QStringLiteral("libei transport is not implemented; use Notify methods")));
+        const auto sessionHandle = typedArg<QDBusObjectPath>(args, 0);
+        const auto appId = typedArg<QString>(args, 1);
+        if (args.size() != 3 || !sessionHandle || !appId || !typedArg<QVariantMap>(args, 2)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid ConnectToEIS arguments")));
+            return true;
+        }
+        auto session = m_sessions.find(sessionHandle->path());
+        if (session == m_sessions.end() || !session->started) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("session is not started")));
+            return true;
+        }
+        if (!isSessionOwner(message, *session)) {
+            connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("session belongs to another D-Bus caller")));
+            return true;
+        }
+        if (!appId->isEmpty())
+            session->appId = security::normalizedAppId(*appId);
+        if (!isAllowedApp(session->appId)) {
+            connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("app id is not allowed")));
+            return true;
+        }
+        if (session->eisConnected) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("EIS is already connected for this session")));
+            return true;
+        }
+        if (!ensureInputReady(message, connection))
+            return true;
+
+        QString eisError;
+        const auto fd = m_eis.addClient(&eisError);
+        if (!fd) {
+            connection.send(error(message, QDBusError::Failed, eisError));
+            return true;
+        }
+        QDBusUnixFileDescriptor descriptor;
+        descriptor.giveFileDescriptor(*fd);
+        session->eisConnected = true;
+        connection.send(message.createReply(QVariant::fromValue(descriptor)));
         return true;
     }
 

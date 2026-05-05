@@ -95,6 +95,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus)
 
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client>=1.20)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon>=1.5)
+pkg_check_modules(LIBEIS REQUIRED IMPORTED_TARGET libeis-1.0>=1.4)
 
 find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner REQUIRED)
 
@@ -126,6 +127,7 @@ endforeach()
 
 add_executable(hypr-kdeconnect-portal
   ${PROTOCOL_SOURCES}
+  src/eis_input_bridge.cpp
   src/key_resolver.cpp
   src/main.cpp
   src/portal_backend.cpp
@@ -139,6 +141,7 @@ target_include_directories(hypr-kdeconnect-portal PRIVATE
 target_link_libraries(hypr-kdeconnect-portal PRIVATE
   Qt6::Core
   Qt6::DBus
+  PkgConfig::LIBEIS
   PkgConfig::WAYLAND_CLIENT
   PkgConfig::XKBCOMMON
 )

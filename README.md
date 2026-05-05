@@ -29,17 +29,17 @@ Implemented:
 - smooth and discrete scrolling
 - keyboard keycode input
 - keyboard keysym input through `xkbcommon`
+- libei `ConnectToEIS` sender clients through a minimal `libeis` bridge
 
 Not implemented:
 
-- libei `ConnectToEIS`
 - touchscreen events
 - InputCapture/share-input-devices edge capture
 - a permission dialog
 
-When KDE Connect tries `ConnectToEIS`, the bridge returns `NotSupported`. KDE
-Connect then falls back to the RemoteDesktop `Notify*` methods, which this
-bridge implements.
+KDE Connect 26.04+ prefers `ConnectToEIS` on Wayland. This bridge accepts that
+path and translates incoming libei pointer, scroll, and keyboard events into the
+same virtual-input backend used by the RemoteDesktop `Notify*` methods.
 
 ## Dependencies
 
@@ -52,18 +52,20 @@ Build-time:
 - `wayland-client` 1.20+
 - `wayland-scanner`
 - `xkbcommon` 1.5+
+- `libeis` 1.4+
 
 Runtime:
 
 - a Wayland compositor exposing `zwlr_virtual_pointer_manager_v1`
 - a Wayland compositor exposing `zwp_virtual_keyboard_manager_v1`
 - `xdg-desktop-portal`
+- `libeis`
 - KDE Connect
 
 On Arch-like systems the useful package set is roughly:
 
 ```sh
-sudo pacman -S cmake gcc pkgconf qt6-base wayland libxkbcommon xdg-desktop-portal
+sudo pacman -S cmake gcc pkgconf qt6-base wayland libxkbcommon libei xdg-desktop-portal
 ```
 
 ## Build
@@ -192,10 +194,14 @@ hyprctl devices | rg 'hypr-kdeconnect|virtual|unknown-device'
    `org.freedesktop.portal.Desktop`.
 2. `xdg-desktop-portal` reads `portals.conf` and forwards RemoteDesktop backend
    calls to `org.freedesktop.impl.portal.desktop.hypr_kdeconnect`.
-3. This bridge accepts KDE Connect sessions from the portal frontend, starts
-   virtual input devices, and implements the RemoteDesktop `Notify*` calls.
-4. Pointer events are sent through `zwlr_virtual_pointer_v1`.
-5. Keyboard events are sent through `zwp_virtual_keyboard_v1`.
+3. This bridge accepts KDE Connect sessions from the portal frontend and starts
+   virtual input devices.
+4. If KDE Connect calls `ConnectToEIS`, libei events are received through
+   `libeis` and translated to the same virtual input path.
+5. If a client uses the older RemoteDesktop `Notify*` calls, those are handled
+   directly.
+6. Pointer events are sent through `zwlr_virtual_pointer_v1`.
+7. Keyboard events are sent through `zwp_virtual_keyboard_v1`.
 
 The protocol XML files are included in this repository and compiled with
 `wayland-scanner`, so the build does not depend on a local compositor source

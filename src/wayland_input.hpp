@@ -37,6 +37,7 @@ class WaylandInput {
     bool pointerAxisDiscrete(std::uint32_t axis, int steps);
     bool keyboardKeycode(std::uint32_t keycode, bool pressed);
     bool keyboardKeysym(std::uint32_t keysym, bool pressed);
+    [[nodiscard]] QRect logicalBounds() const;
 
     static void handleGlobal(void* data, wl_registry* registry, std::uint32_t name, const char* interface, std::uint32_t version);
     static void handleGlobalRemove(void* data, wl_registry* registry, std::uint32_t name);

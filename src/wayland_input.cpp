@@ -389,6 +389,10 @@ bool WaylandInput::keyboardKeysym(std::uint32_t keysym, bool pressed) {
     return ok && shiftOk;
 }
 
+QRect WaylandInput::logicalBounds() const {
+    return outputBounds();
+}
+
 std::uint32_t WaylandInput::timeMs() const {
     return static_cast<std::uint32_t>(m_timer.elapsed());
 }
