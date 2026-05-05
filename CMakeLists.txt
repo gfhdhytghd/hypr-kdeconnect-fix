@@ -57,6 +57,7 @@ function(hkcf_apply_target_defaults target)
       $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:_FORTIFY_SOURCE=3>
     )
     foreach(flag
+      -fPIE
       -fstack-protector-strong
       -fstack-clash-protection
       -fcf-protection=full
@@ -71,6 +72,7 @@ function(hkcf_apply_target_defaults target)
       target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Werror=format-security>)
     endif()
     foreach(flag
+      -pie
       LINKER:-z,relro
       LINKER:-z,now
       LINKER:-z,noexecstack
@@ -82,6 +84,10 @@ endfunction()
 
 if(HKCF_ENABLE_HARDENING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   check_pie_supported()
+endif()
+set(HKCF_EXPECT_PIE OFF)
+if(HKCF_ENABLE_HARDENING AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_LINK_PIE_SUPPORTED)
+  set(HKCF_EXPECT_PIE ON)
 endif()
 
 find_package(PkgConfig REQUIRED)
@@ -191,6 +197,7 @@ if(BUILD_TESTING)
   add_test(NAME hardening-readelf-test
     COMMAND ${CMAKE_COMMAND}
       -DHKCF_EXECUTABLE=$<TARGET_FILE:hypr-kdeconnect-portal>
+      -DHKCF_EXPECT_PIE=${HKCF_EXPECT_PIE}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/hardening_readelf_test.cmake
   )
 endif()

@@ -20,7 +20,10 @@ execute_process(
 if(NOT readelf_result EQUAL 0)
   message(FATAL_ERROR "readelf -h failed: ${readelf_error}")
 endif()
-if(NOT elf_header MATCHES "Type:[ ]*DYN")
+if(NOT DEFINED HKCF_EXPECT_PIE)
+  set(HKCF_EXPECT_PIE ON)
+endif()
+if(HKCF_EXPECT_PIE AND NOT elf_header MATCHES "Type:[ ]*DYN")
   message(FATAL_ERROR "executable is not PIE/ET_DYN")
 endif()
 
