@@ -12,7 +12,7 @@ if(NOT EXISTS "${HKCF_EXECUTABLE}")
 endif()
 
 execute_process(
-  COMMAND "${READELF_EXECUTABLE}" -hW "${HKCF_EXECUTABLE}"
+  COMMAND "${CMAKE_COMMAND}" -E env LC_ALL=C "${READELF_EXECUTABLE}" -hW "${HKCF_EXECUTABLE}"
   OUTPUT_VARIABLE elf_header
   ERROR_VARIABLE readelf_error
   RESULT_VARIABLE readelf_result
@@ -28,7 +28,7 @@ if(HKCF_EXPECT_PIE AND NOT elf_header MATCHES "Type:[ ]*DYN")
 endif()
 
 execute_process(
-  COMMAND "${READELF_EXECUTABLE}" -lW "${HKCF_EXECUTABLE}"
+  COMMAND "${CMAKE_COMMAND}" -E env LC_ALL=C "${READELF_EXECUTABLE}" -lW "${HKCF_EXECUTABLE}"
   OUTPUT_VARIABLE program_headers
   ERROR_VARIABLE readelf_error
   RESULT_VARIABLE readelf_result
@@ -44,7 +44,7 @@ if(program_headers MATCHES "GNU_STACK[^\\n]*RWE")
 endif()
 
 execute_process(
-  COMMAND "${READELF_EXECUTABLE}" -dW "${HKCF_EXECUTABLE}"
+  COMMAND "${CMAKE_COMMAND}" -E env LC_ALL=C "${READELF_EXECUTABLE}" -dW "${HKCF_EXECUTABLE}"
   OUTPUT_VARIABLE dynamic_section
   ERROR_VARIABLE readelf_error
   RESULT_VARIABLE readelf_result
