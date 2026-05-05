@@ -11,6 +11,9 @@ through Hyprland's virtual keyboard and virtual pointer Wayland protocols.
 
 This is a compatibility shim, not a Hyprland plugin.
 
+> [!WARNING]
+> This software is 99% vibe coded with OpenAI CodeX, but have been manual audited, warn in case you mind it.
+
 ## Status
 
 Implemented:
