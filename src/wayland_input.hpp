@@ -87,7 +87,8 @@ class WaylandInput {
     QElapsedTimer m_timer;
     QString m_lastError;
     KeyResolver m_keyResolver;
-    QHash<std::uint32_t, bool> m_keysymShiftState;
+    QHash<std::uint32_t, int> m_keysymShiftCounts;
+    int m_shiftedKeysDown = 0;
 };
 
 } // namespace hkcf

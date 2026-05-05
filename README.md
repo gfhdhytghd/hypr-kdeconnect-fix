@@ -1,15 +1,20 @@
 # hypr-kdeconnect-fix
 
 A small user-level `xdg-desktop-portal` RemoteDesktop backend that makes KDE
-Connect remote input work on Hyprland.
+Connect remote input work on Wayland compositors that expose virtual input
+protocols.
 
 KDE Connect already uses `org.freedesktop.portal.RemoteDesktop` for remote
-mouse and keyboard input on Wayland. Hyprland's standard portal backend exposes
-screenshots, screencast, and global shortcuts, but not RemoteDesktop input. This
-bridge fills that one missing portal backend interface and injects events
-through Hyprland's virtual keyboard and virtual pointer Wayland protocols.
+mouse and keyboard input on Wayland. Some compositor-specific portal backends
+expose screenshots, screencast, and global shortcuts, but not RemoteDesktop
+input. This bridge fills that one missing portal backend interface and injects
+events through `zwp_virtual_keyboard_manager_v1` and
+`zwlr_virtual_pointer_manager_v1`.
 
-This is a compatibility shim, not a Hyprland plugin.
+This is a compatibility shim, not a compositor plugin. It was written for
+Hyprland, but the core requirement is protocol support; it can also work on
+wlroots or protocol-compatible compositors such as sway, river, Wayfire, labwc,
+phosh, and niri when their portal routing is configured.
 
 > [!WARNING]
 > This software is 99% vibe coded with OpenAI CodeX, but have been manual audited, warn in case you mind it.
@@ -42,16 +47,16 @@ Build-time:
 
 - CMake
 - a C++23 compiler
-- Qt 6 Core/DBus
+- Qt 6.5+ Core/DBus
 - `pkg-config`
-- `wayland-client`
+- `wayland-client` 1.20+
 - `wayland-scanner`
-- `xkbcommon`
+- `xkbcommon` 1.5+
 
 Runtime:
 
-- Hyprland exposing `zwlr_virtual_pointer_manager_v1`
-- Hyprland exposing `zwp_virtual_keyboard_manager_v1`
+- a Wayland compositor exposing `zwlr_virtual_pointer_manager_v1`
+- a Wayland compositor exposing `zwp_virtual_keyboard_manager_v1`
 - `xdg-desktop-portal`
 - KDE Connect
 
@@ -75,12 +80,31 @@ This installs:
 - `~/.local/bin/hypr-kdeconnect-portal`
 - `~/.local/share/xdg-desktop-portal/portals/hypr-kdeconnect.portal`
 - `~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.hypr_kdeconnect.service`
+- `~/.local/share/systemd/user/hypr-kdeconnect-portal.service`
+
+The default build enables compiler/linker hardening on Linux, including PIE,
+RELRO/BIND_NOW, stack protector, and fortify checks when the compiler supports
+them.
+
+By default, the generated portal metadata is visible when `XDG_CURRENT_DESKTOP`
+is one of `wlroots`, `Hyprland`, `sway`, `Wayfire`, `river`, `phosh`, `niri`, or
+`labwc`. If your compatible compositor uses a different desktop id, set it at
+configure time:
+
+```sh
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local" \
+  -DHKCF_PORTAL_USE_IN='wlroots;Hyprland;sway;Wayfire;river;phosh;niri;labwc;your-desktop-id'
+```
 
 ## Portal Configuration
 
 Configure `xdg-desktop-portal` to route only RemoteDesktop to this backend, while
-leaving the normal Hyprland portal in charge of screenshot, screencast, and
-global shortcuts.
+leaving your normal portal providers in charge of screenshot, screencast, global
+shortcuts, file chooser, and other interfaces.
+
+Hyprland example:
 
 `~/.config/xdg-desktop-portal/portals.conf`:
 
@@ -93,18 +117,46 @@ org.freedesktop.impl.portal.GlobalShortcuts=hyprland
 org.freedesktop.impl.portal.RemoteDesktop=hypr-kdeconnect
 ```
 
-Restart the portal frontend after changing metadata or `portals.conf`:
+niri example:
+
+```ini
+[preferred]
+default=gnome;gtk;
+org.freedesktop.impl.portal.Access=gtk
+org.freedesktop.impl.portal.Notification=gtk
+org.freedesktop.impl.portal.Secret=gnome-keyring
+org.freedesktop.impl.portal.RemoteDesktop=hypr-kdeconnect
+```
+
+For other wlroots/protocol-compatible compositors, keep your existing
+`portals.conf` defaults and add only:
+
+```ini
+org.freedesktop.impl.portal.RemoteDesktop=hypr-kdeconnect
+```
+
+Reload user units and restart the portal frontend after changing metadata or
+`portals.conf`:
 
 ```sh
+systemctl --user daemon-reload
 systemctl --user restart xdg-desktop-portal
 ```
 
-If D-Bus already activated an older bridge process, kill it so the next request
-starts the newly installed binary:
+If D-Bus already activated an older bridge process, stop the user unit first:
+
+```sh
+systemctl --user stop hypr-kdeconnect-portal.service
+```
+
+If it was started by plain D-Bus activation instead of systemd, verify the
+binary path before killing it:
 
 ```sh
 pid="$(busctl --user status org.freedesktop.impl.portal.desktop.hypr_kdeconnect 2>/dev/null | awk -F= '/^PID=/{print $2; exit}')"
-[ -n "$pid" ] && kill "$pid"
+if [ -n "$pid" ] && [ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" = "$HOME/.local/bin/hypr-kdeconnect-portal" ]; then
+  kill "$pid"
+fi
 ```
 
 ## Verification
@@ -118,14 +170,15 @@ busctl --user introspect \
   org.freedesktop.portal.RemoteDesktop
 ```
 
-Check direct virtual pointer injection:
+Check direct virtual pointer injection. These commands will move the pointer in
+the current Wayland session:
 
 ```sh
 hypr-kdeconnect-portal --self-test-motion 120 0
 hypr-kdeconnect-portal --self-test-absolute 1440 900
 ```
 
-Check that Hyprland sees the virtual devices:
+On Hyprland, you can also check that the compositor sees the virtual devices:
 
 ```sh
 hyprctl devices | rg 'hypr-kdeconnect|virtual|unknown-device'
@@ -137,20 +190,29 @@ hyprctl devices | rg 'hypr-kdeconnect|virtual|unknown-device'
    `org.freedesktop.portal.Desktop`.
 2. `xdg-desktop-portal` reads `portals.conf` and forwards RemoteDesktop backend
    calls to `org.freedesktop.impl.portal.desktop.hypr_kdeconnect`.
-3. This bridge accepts KDE Connect sessions, starts virtual input devices, and
-   implements the RemoteDesktop `Notify*` calls.
+3. This bridge accepts KDE Connect sessions from the portal frontend, starts
+   virtual input devices, and implements the RemoteDesktop `Notify*` calls.
 4. Pointer events are sent through `zwlr_virtual_pointer_v1`.
 5. Keyboard events are sent through `zwp_virtual_keyboard_v1`.
 
 The protocol XML files are included in this repository and compiled with
-`wayland-scanner`, so the build does not depend on a local Hyprland source tree.
+`wayland-scanner`, so the build does not depend on a local compositor source
+tree.
 
 ## Security Notes
 
-Hyprland exposes the virtual input protocols to local Wayland clients. This
-bridge does not add a graphical permission prompt on top of that. It accepts KDE
-Connect app ids and Hyprland's `surface-transient` fallback app id used by
-non-windowed local clients.
+Compositors that expose the virtual input protocols usually expose them to
+trusted local Wayland clients. This bridge does not add a graphical permission
+prompt on top of that, so it narrows the D-Bus attack surface instead:
+
+- RemoteDesktop and Session methods are accepted only from the current
+  `org.freedesktop.portal.Desktop` owner.
+- Sessions are bound to that D-Bus sender and capped in number.
+- Empty app ids and substring spoofing are rejected. Accepted ids are exact KDE
+  Connect desktop ids plus the `surface-transient` fallback used by some
+  non-windowed local clients.
+- Notify calls are checked against the selected device mask and bounded before
+  being forwarded to Wayland.
 
 Use it as a local-session compatibility bridge. Do not install it system-wide on
 multi-user machines unless that trust model is acceptable.
@@ -175,8 +237,11 @@ systemctl --user restart xdg-desktop-portal
 If an old binary keeps running after reinstall:
 
 ```sh
+systemctl --user stop hypr-kdeconnect-portal.service
 pid="$(busctl --user status org.freedesktop.impl.portal.desktop.hypr_kdeconnect 2>/dev/null | awk -F= '/^PID=/{print $2; exit}')"
-[ -n "$pid" ] && kill "$pid"
+if [ -n "$pid" ] && [ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" = "$HOME/.local/bin/hypr-kdeconnect-portal" ]; then
+  kill "$pid"
+fi
 ```
 
 ## Uninstall
@@ -185,6 +250,8 @@ pid="$(busctl --user status org.freedesktop.impl.portal.desktop.hypr_kdeconnect 
 rm -f ~/.local/bin/hypr-kdeconnect-portal
 rm -f ~/.local/share/xdg-desktop-portal/portals/hypr-kdeconnect.portal
 rm -f ~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.hypr_kdeconnect.service
+rm -f ~/.local/share/systemd/user/hypr-kdeconnect-portal.service
+systemctl --user daemon-reload
 systemctl --user restart xdg-desktop-portal
 ```
 

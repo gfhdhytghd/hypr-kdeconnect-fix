@@ -1,0 +1,19 @@
+[Unit]
+Description=KDE Connect RemoteDesktop portal backend for virtual-input Wayland compositors
+PartOf=xdg-desktop-portal.service
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.hypr_kdeconnect
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/hypr-kdeconnect-portal
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native

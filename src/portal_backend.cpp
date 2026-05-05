@@ -1,12 +1,17 @@
 #include "portal_backend.hpp"
 
+#include "security_policy.hpp"
+
 #include <algorithm>
+#include <optional>
 
 #include <QCoreApplication>
 #include <QDBusArgument>
+#include <QDBusConnectionInterface>
 #include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusMetaType>
+#include <QDBusReply>
 #include <QDBusVariant>
 #include <QDebug>
 
@@ -21,6 +26,7 @@ constexpr auto kPropertiesInterface = "org.freedesktop.DBus.Properties";
 constexpr auto kIntrospectableInterface = "org.freedesktop.DBus.Introspectable";
 constexpr auto kPeerInterface = "org.freedesktop.DBus.Peer";
 constexpr auto kNotSupported = "org.freedesktop.DBus.Error.NotSupported";
+constexpr auto kPortalFrontendService = "org.freedesktop.portal.Desktop";
 
 template <typename T>
 std::optional<T> typedArg(const QList<QVariant>& args, int index) {
@@ -36,26 +42,62 @@ std::optional<T> typedArg(const QList<QVariant>& args, int index) {
         if (args[index].canConvert<QString>())
             return args[index].toString();
     } else if constexpr (std::is_same_v<T, double>) {
-        if (args[index].canConvert<double>())
-            return args[index].toDouble();
+        bool ok = false;
+        const double value = args[index].toDouble(&ok);
+        if (ok)
+            return value;
     } else if constexpr (std::is_same_v<T, std::uint32_t>) {
-        if (args[index].canConvert<uint>())
-            return args[index].toUInt();
+        bool ok = false;
+        const uint value = args[index].toUInt(&ok);
+        if (ok)
+            return value;
     } else if constexpr (std::is_same_v<T, int>) {
-        if (args[index].canConvert<int>())
-            return args[index].toInt();
+        bool ok = false;
+        const int value = args[index].toInt(&ok);
+        if (ok)
+            return value;
     }
     return std::nullopt;
 }
 
-std::uint32_t boolState(std::uint32_t state) {
-    return state != 0;
+QVariant unwrapDbusVariant(const QVariant& value) {
+    if (value.metaType() == QMetaType::fromType<QDBusVariant>())
+        return value.value<QDBusVariant>().variant();
+    return value;
+}
+
+std::optional<std::uint32_t> uintOption(const QVariantMap& options, const QString& key, std::uint32_t fallback) {
+    if (!options.contains(key))
+        return fallback;
+
+    bool ok = false;
+    const uint value = unwrapDbusVariant(options.value(key)).toUInt(&ok);
+    if (!ok)
+        return std::nullopt;
+    return value;
+}
+
+QString safeForLog(QString value) {
+    value = value.left(hkcf::security::kMaxAppIdLength);
+    for (QChar& ch : value) {
+        if (ch.unicode() < 0x20 || ch.unicode() == 0x7f)
+            ch = QLatin1Char('?');
+    }
+    return value;
+}
+
+std::optional<double> boundedDoubleArg(const QList<QVariant>& args, int index, double maxAbs) {
+    const auto value = typedArg<double>(args, index);
+    if (!value)
+        return std::nullopt;
+    return hkcf::security::boundedFinite(*value, maxAbs);
 }
 
 } // namespace
 
 PortalBackend::PortalBackend(QObject* parent)
     : QDBusVirtualObject(parent) {
+    m_rateTimer.start();
 }
 
 bool PortalBackend::handleMessage(const QDBusMessage& message, const QDBusConnection& connection) {
@@ -205,66 +247,124 @@ QString PortalBackend::introspect(const QString& path) const {
 }
 
 bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBusConnection& connection) {
+    if (!isTrustedPortalCaller(message, connection)) {
+        connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("RemoteDesktop backend accepts calls only from xdg-desktop-portal")));
+        return true;
+    }
+
     const auto args = message.arguments();
     const QString member = message.member();
 
     if (member == QStringLiteral("CreateSession")) {
+        const auto requestHandle = typedArg<QDBusObjectPath>(args, 0);
         const auto sessionHandle = typedArg<QDBusObjectPath>(args, 1);
-        const auto appId = typedArg<QString>(args, 2).value_or(QString());
-        if (!sessionHandle) {
-            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("missing session handle")));
+        const auto appId = typedArg<QString>(args, 2);
+        const auto options = typedArg<QVariantMap>(args, 3);
+        if (args.size() != 4 || !requestHandle || !sessionHandle || !appId || !options) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid CreateSession arguments")));
+            return true;
+        }
+
+        const QString path = sessionHandle->path();
+        if (!isSessionPath(path)) {
+            connection.send(error(message, QDBusError::InvalidObjectPath, QStringLiteral("invalid session handle path")));
+            return true;
+        }
+        if (!security::isPlausibleAppId(*appId)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid app id")));
+            return true;
+        }
+        if (m_sessions.contains(path)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("session handle already exists")));
+            return true;
+        }
+        if (m_sessions.size() >= security::kMaxSessions) {
+            connection.send(error(message, QDBusError::LimitsExceeded, QStringLiteral("too many active sessions")));
             return true;
         }
 
         Session session;
-        session.appId = appId;
-        m_sessions.insert(sessionHandle->path(), session);
+        session.owner = message.service();
+        session.appId = security::normalizedAppId(*appId);
+        m_sessions.insert(path, session);
 
         QVariantMap results;
-        results.insert(QStringLiteral("session"), sessionHandle->path());
-        results.insert(QStringLiteral("session_id"), sessionHandle->path());
+        results.insert(QStringLiteral("session"), path);
+        results.insert(QStringLiteral("session_id"), path);
         connection.send(response(message, 0, results));
         return true;
     }
 
     if (member == QStringLiteral("SelectDevices")) {
         const auto sessionHandle = typedArg<QDBusObjectPath>(args, 1);
-        const auto options = typedArg<QVariantMap>(args, 3).value_or(QVariantMap());
-        if (!sessionHandle || !m_sessions.contains(sessionHandle->path())) {
-            connection.send(response(message, 2));
+        const auto options = typedArg<QVariantMap>(args, 3);
+        if (args.size() != 4 || !typedArg<QDBusObjectPath>(args, 0) || !sessionHandle || !typedArg<QString>(args, 2) || !options) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid SelectDevices arguments")));
             return true;
         }
 
-        auto& session = m_sessions[sessionHandle->path()];
-        session.requestedTypes = options.value(QStringLiteral("types"), kSupportedDevices).toUInt() & kSupportedDevices;
-        if (!session.requestedTypes)
-            session.requestedTypes = kSupportedDevices;
+        auto session = m_sessions.find(sessionHandle->path());
+        if (session == m_sessions.end()) {
+            connection.send(response(message, 2));
+            return true;
+        }
+        if (!isSessionOwner(message, *session)) {
+            connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("session belongs to another D-Bus caller")));
+            return true;
+        }
+
+        const auto requestedTypes = uintOption(*options, QStringLiteral("types"), kSupportedDevices);
+        if (!requestedTypes) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid device type mask")));
+            return true;
+        }
+
+        session->requestedTypes = *requestedTypes & kSupportedDevices;
+        if (!session->requestedTypes) {
+            connection.send(response(message, 2, {{QStringLiteral("error"), QStringLiteral("no supported devices selected")}}));
+            return true;
+        }
+        session->devicesSelected = true;
         connection.send(response(message, 0));
         return true;
     }
 
     if (member == QStringLiteral("Start")) {
         const auto sessionHandle = typedArg<QDBusObjectPath>(args, 1);
-        const auto appId = typedArg<QString>(args, 2).value_or(QString());
-        if (!sessionHandle || !m_sessions.contains(sessionHandle->path())) {
-            connection.send(response(message, 2));
+        const auto appId = typedArg<QString>(args, 2);
+        if (args.size() != 5 || !typedArg<QDBusObjectPath>(args, 0) || !sessionHandle || !appId || !typedArg<QString>(args, 3) ||
+            !typedArg<QVariantMap>(args, 4)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid Start arguments")));
             return true;
         }
 
-        auto& session = m_sessions[sessionHandle->path()];
-        if (!appId.isEmpty())
-            session.appId = appId;
-        if (!isAllowedApp(session.appId)) {
-            qWarning() << "refusing RemoteDesktop session for app id" << session.appId;
-            connection.send(response(message, 1));
+        auto session = m_sessions.find(sessionHandle->path());
+        if (session == m_sessions.end()) {
+            connection.send(response(message, 2));
+            return true;
+        }
+        if (!isSessionOwner(message, *session)) {
+            connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("session belongs to another D-Bus caller")));
+            return true;
+        }
+
+        if (!session->devicesSelected) {
+            connection.send(response(message, 2, {{QStringLiteral("error"), QStringLiteral("devices were not selected")}}));
+            return true;
+        }
+        if (!appId->isEmpty())
+            session->appId = security::normalizedAppId(*appId);
+        if (!isAllowedApp(session->appId)) {
+            qWarning() << "refusing RemoteDesktop session for app id" << safeForLog(session->appId);
+            connection.send(response(message, 1, {{QStringLiteral("error"), QStringLiteral("app id is not allowed")}}));
             return true;
         }
         if (!ensureInputReady(message, connection))
             return true;
 
-        session.started = true;
+        session->started = true;
         QVariantMap results;
-        results.insert(QStringLiteral("devices"), session.requestedTypes & kSupportedDevices);
+        results.insert(QStringLiteral("devices"), session->requestedTypes & kSupportedDevices);
         results.insert(QStringLiteral("clipboard_enabled"), false);
         connection.send(response(message, 0, results));
         return true;
@@ -276,69 +376,123 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
     }
 
     const auto sessionHandle = typedArg<QDBusObjectPath>(args, 0);
-    if (!sessionHandle || !m_sessions.contains(sessionHandle->path()) || !m_sessions[sessionHandle->path()].started) {
+    if (!sessionHandle) {
+        connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("missing session handle")));
+        return true;
+    }
+    auto session = m_sessions.find(sessionHandle->path());
+    if (session == m_sessions.end() || !session->started) {
         connection.send(message.createReply());
         return true;
     }
+    if (!isSessionOwner(message, *session)) {
+        connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("session belongs to another D-Bus caller")));
+        return true;
+    }
+    if (!checkNotifyRate(message, connection, *session))
+        return true;
 
     if (member == QStringLiteral("NotifyPointerMotion")) {
-        const auto dx = typedArg<double>(args, 2).value_or(0.0);
-        const auto dy = typedArg<double>(args, 3).value_or(0.0);
-        m_input.pointerMotion(dx, dy);
-        connection.send(message.createReply());
-        return true;
+        if (args.size() != 4 || !typedArg<QVariantMap>(args, 1) || !hasDevice(*session, kPointer)) {
+            connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("pointer device was not selected")));
+            return true;
+        }
+        const auto dx = boundedDoubleArg(args, 2, security::kMaxPointerDelta);
+        const auto dy = boundedDoubleArg(args, 3, security::kMaxPointerDelta);
+        if (!dx || !dy) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid pointer motion delta")));
+            return true;
+        }
+        return sendInputResult(message, connection, m_input.pointerMotion(*dx, *dy));
     }
 
     if (member == QStringLiteral("NotifyPointerMotionAbsolute")) {
-        const auto x = typedArg<double>(args, 3).value_or(0.0);
-        const auto y = typedArg<double>(args, 4).value_or(0.0);
-        m_input.pointerMotionAbsolute(x, y);
-        connection.send(message.createReply());
-        return true;
+        if (args.size() != 5 || !typedArg<QVariantMap>(args, 1) || !typedArg<std::uint32_t>(args, 2) || !hasDevice(*session, kPointer)) {
+            connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("pointer device was not selected")));
+            return true;
+        }
+        const auto x = boundedDoubleArg(args, 3, security::kMaxAbsoluteCoordinate);
+        const auto y = boundedDoubleArg(args, 4, security::kMaxAbsoluteCoordinate);
+        if (!x || !y) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid absolute pointer coordinates")));
+            return true;
+        }
+        return sendInputResult(message, connection, m_input.pointerMotionAbsolute(*x, *y));
     }
 
     if (member == QStringLiteral("NotifyPointerButton")) {
-        const auto button = typedArg<int>(args, 2).value_or(0);
-        const auto state = typedArg<std::uint32_t>(args, 3).value_or(0);
-        if (button > 0)
-            m_input.pointerButton(static_cast<std::uint32_t>(button), boolState(state));
-        connection.send(message.createReply());
-        return true;
+        const auto button = typedArg<int>(args, 2);
+        const auto state = typedArg<std::uint32_t>(args, 3);
+        if (args.size() != 4 || !typedArg<QVariantMap>(args, 1) || !button || !state || *button < 0 || !hasDevice(*session, kPointer)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid pointer button arguments")));
+            return true;
+        }
+        const auto buttonCode = static_cast<std::uint32_t>(*button);
+        if (!security::isAllowedPointerButton(buttonCode) || !security::isValidState(*state)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid pointer button or state")));
+            return true;
+        }
+        return sendInputResult(message, connection, m_input.pointerButton(buttonCode, security::stateToPressed(*state)));
     }
 
     if (member == QStringLiteral("NotifyPointerAxis")) {
-        const auto dx = typedArg<double>(args, 2).value_or(0.0);
-        const auto dy = typedArg<double>(args, 3).value_or(0.0);
-        m_input.pointerAxis(dx, dy);
-        connection.send(message.createReply());
-        return true;
+        if (args.size() != 4 || !typedArg<QVariantMap>(args, 1) || !hasDevice(*session, kPointer)) {
+            connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("pointer device was not selected")));
+            return true;
+        }
+        const auto dx = boundedDoubleArg(args, 2, security::kMaxAxisDelta);
+        const auto dy = boundedDoubleArg(args, 3, security::kMaxAxisDelta);
+        if (!dx || !dy) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid pointer axis delta")));
+            return true;
+        }
+        return sendInputResult(message, connection, m_input.pointerAxis(*dx, *dy));
     }
 
     if (member == QStringLiteral("NotifyPointerAxisDiscrete")) {
-        const auto axis = typedArg<std::uint32_t>(args, 2).value_or(0);
-        const auto steps = typedArg<int>(args, 3).value_or(0);
+        const auto axis = typedArg<std::uint32_t>(args, 2);
+        const auto steps = typedArg<int>(args, 3);
+        if (args.size() != 4 || !typedArg<QVariantMap>(args, 1) || !axis || !steps || !hasDevice(*session, kPointer)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid discrete axis arguments")));
+            return true;
+        }
+        if (!security::isAllowedDiscreteAxis(*axis)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid discrete axis")));
+            return true;
+        }
         constexpr double kDiscreteStep = 15.0;
-        m_input.pointerAxis(axis == 1 ? steps * kDiscreteStep : 0.0, axis == 0 ? steps * kDiscreteStep : 0.0);
-        connection.send(message.createReply());
-        return true;
+        const int boundedSteps = security::clampDiscreteScrollSteps(*steps);
+        return sendInputResult(message, connection, m_input.pointerAxis(*axis == 1 ? boundedSteps * kDiscreteStep : 0.0, *axis == 0 ? boundedSteps * kDiscreteStep : 0.0));
     }
 
     if (member == QStringLiteral("NotifyKeyboardKeycode")) {
-        const auto keycode = typedArg<int>(args, 2).value_or(0);
-        const auto state = typedArg<std::uint32_t>(args, 3).value_or(0);
-        if (keycode > 0)
-            m_input.keyboardKeycode(static_cast<std::uint32_t>(keycode), boolState(state));
-        connection.send(message.createReply());
-        return true;
+        const auto keycode = typedArg<int>(args, 2);
+        const auto state = typedArg<std::uint32_t>(args, 3);
+        if (args.size() != 4 || !typedArg<QVariantMap>(args, 1) || !keycode || !state || *keycode < 0 || !hasDevice(*session, kKeyboard)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid keyboard keycode arguments")));
+            return true;
+        }
+        const auto keycodeValue = static_cast<std::uint32_t>(*keycode);
+        if (!security::isAllowedKeyboardKeycode(keycodeValue) || !security::isValidState(*state)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid keyboard keycode or state")));
+            return true;
+        }
+        return sendInputResult(message, connection, m_input.keyboardKeycode(keycodeValue, security::stateToPressed(*state)));
     }
 
     if (member == QStringLiteral("NotifyKeyboardKeysym")) {
-        const auto keysym = typedArg<int>(args, 2).value_or(0);
-        const auto state = typedArg<std::uint32_t>(args, 3).value_or(0);
-        if (keysym > 0)
-            m_input.keyboardKeysym(static_cast<std::uint32_t>(keysym), boolState(state));
-        connection.send(message.createReply());
-        return true;
+        const auto keysym = typedArg<int>(args, 2);
+        const auto state = typedArg<std::uint32_t>(args, 3);
+        if (args.size() != 4 || !typedArg<QVariantMap>(args, 1) || !keysym || !state || *keysym < 0 || !hasDevice(*session, kKeyboard)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid keyboard keysym arguments")));
+            return true;
+        }
+        const auto keysymValue = static_cast<std::uint32_t>(*keysym);
+        if (!security::isAllowedKeysym(keysymValue) || !security::isValidState(*state)) {
+            connection.send(error(message, QDBusError::InvalidArgs, QStringLiteral("invalid keyboard keysym or state")));
+            return true;
+        }
+        return sendInputResult(message, connection, m_input.keyboardKeysym(keysymValue, security::stateToPressed(*state)));
     }
 
     connection.send(error(message, QDBusError::UnknownMethod, QStringLiteral("unknown RemoteDesktop method %1").arg(member)));
@@ -346,12 +500,27 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
 }
 
 bool PortalBackend::handleSession(const QDBusMessage& message, const QDBusConnection& connection) {
+    if (!isTrustedPortalCaller(message, connection)) {
+        connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("Session backend accepts calls only from xdg-desktop-portal")));
+        return true;
+    }
+
     if (message.member() != QStringLiteral("Close")) {
         connection.send(error(message, QDBusError::UnknownMethod, QStringLiteral("unknown Session method")));
         return true;
     }
 
-    m_sessions.remove(message.path());
+    auto session = m_sessions.find(message.path());
+    if (session == m_sessions.end()) {
+        connection.send(message.createReply());
+        return true;
+    }
+    if (!isSessionOwner(message, *session)) {
+        connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("session belongs to another D-Bus caller")));
+        return true;
+    }
+
+    m_sessions.erase(session);
     connection.send(message.createReply());
     connection.send(QDBusMessage::createSignal(message.path(), QString::fromLatin1(kSessionInterface), QStringLiteral("Closed")));
     return true;
@@ -429,16 +598,64 @@ QVariantMap PortalBackend::propertiesFor(const QString& interface) const {
 bool PortalBackend::ensureInputReady(const QDBusMessage& message, const QDBusConnection& connection) {
     if (m_input.ensureReady())
         return true;
-    connection.send(response(message, 2, {{QStringLiteral("error"), m_input.lastError()}}));
+    qWarning() << "failed to initialize Wayland input:" << m_input.lastError();
+    connection.send(response(message, 2, {{QStringLiteral("error"), QStringLiteral("input backend unavailable")}}));
+    return false;
+}
+
+bool PortalBackend::sendInputResult(const QDBusMessage& message, const QDBusConnection& connection, bool ok) {
+    if (ok) {
+        connection.send(message.createReply());
+        return true;
+    }
+
+    qWarning() << "input injection failed:" << m_input.lastError();
+    connection.send(error(message, QDBusError::Failed, QStringLiteral("input injection failed")));
+    return true;
+}
+
+bool PortalBackend::checkNotifyRate(const QDBusMessage& message, const QDBusConnection& connection, Session& session) {
+    const qint64 now = m_rateTimer.elapsed();
+    if (now - session.rateWindowStartMs >= security::kNotifyRateWindowMs) {
+        session.rateWindowStartMs = now;
+        session.eventsInRateWindow = 0;
+    }
+
+    ++session.eventsInRateWindow;
+    if (session.eventsInRateWindow <= security::kMaxNotifyEventsPerWindow)
+        return true;
+
+    connection.send(error(message, QDBusError::LimitsExceeded, QStringLiteral("too many input events")));
     return false;
 }
 
 bool PortalBackend::isAllowedApp(const QString& appId) const {
-    return appId.isEmpty() || appId.contains(QStringLiteral("kdeconnect"), Qt::CaseInsensitive) || appId == QStringLiteral("surface-transient");
+    return security::isAllowedAppId(appId);
+}
+
+bool PortalBackend::isTrustedPortalCaller(const QDBusMessage& message, const QDBusConnection& connection) const {
+    const QString sender = message.service();
+    if (sender.isEmpty())
+        return false;
+
+    QDBusConnectionInterface* bus = connection.interface();
+    if (!bus)
+        return false;
+
+    const QDBusReply<QString> owner = bus->serviceOwner(QString::fromLatin1(kPortalFrontendService));
+    return owner.isValid() && !owner.value().isEmpty() && owner.value() == sender;
+}
+
+bool PortalBackend::isSessionOwner(const QDBusMessage& message, const Session& session) const {
+    return !session.owner.isEmpty() && session.owner == message.service();
 }
 
 bool PortalBackend::isSessionPath(const QString& path) const {
-    return path.startsWith(QString::fromLatin1(kDesktopPath) + QStringLiteral("/session/"));
+    return security::isValidSessionPath(path);
+}
+
+bool PortalBackend::hasDevice(const Session& session, std::uint32_t device) const {
+    return session.devicesSelected && (session.requestedTypes & device) == device;
 }
 
 QDBusMessage PortalBackend::response(const QDBusMessage& message, std::uint32_t code, const QVariantMap& results) const {

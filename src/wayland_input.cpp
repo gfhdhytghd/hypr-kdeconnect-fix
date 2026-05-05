@@ -1,8 +1,11 @@
 #include "wayland_input.hpp"
 
+#include "security_policy.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <sys/mman.h>
@@ -59,8 +62,27 @@ std::optional<int> createMemfd(const char* name) {
     const int fd = mkstemp(path);
     if (fd < 0)
         return std::nullopt;
+    const int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0)
+        fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
     unlink(path);
     return fd;
+}
+
+bool writeAll(int fd, const char* data, std::size_t size) {
+    std::size_t offset = 0;
+    while (offset < size) {
+        const ssize_t written = write(fd, data + offset, size - offset);
+        if (written < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        if (written == 0)
+            return false;
+        offset += static_cast<std::size_t>(written);
+    }
+    return true;
 }
 
 } // namespace
@@ -102,8 +124,11 @@ bool WaylandInput::connect() {
     }
 
     wl_registry_add_listener(m_registry, &kRegistryListener, this);
-    wl_display_roundtrip(m_display);
-    wl_display_roundtrip(m_display);
+    if (wl_display_roundtrip(m_display) < 0 || wl_display_roundtrip(m_display) < 0) {
+        setError(QStringLiteral("failed to read Wayland registry"));
+        cleanup();
+        return false;
+    }
 
     if (!m_seat) {
         setError(QStringLiteral("Wayland compositor did not expose wl_seat"));
@@ -112,13 +137,13 @@ bool WaylandInput::connect() {
     }
 
     if (!m_virtualPointerManager) {
-        setError(QStringLiteral("Hyprland did not expose zwlr_virtual_pointer_manager_v1"));
+        setError(QStringLiteral("Wayland compositor did not expose zwlr_virtual_pointer_manager_v1"));
         cleanup();
         return false;
     }
 
     if (!m_virtualKeyboardManager) {
-        setError(QStringLiteral("Hyprland did not expose zwp_virtual_keyboard_manager_v1"));
+        setError(QStringLiteral("Wayland compositor did not expose zwp_virtual_keyboard_manager_v1"));
         cleanup();
         return false;
     }
@@ -137,8 +162,11 @@ bool WaylandInput::createDevices() {
             setError(QStringLiteral("failed to create virtual keyboard"));
             return false;
         }
-        if (!sendKeyboardKeymap())
+        if (!sendKeyboardKeymap()) {
+            zwp_virtual_keyboard_v1_destroy(m_keyboard);
+            m_keyboard = nullptr;
             return false;
+        }
     }
 
     if (!m_pointer) {
@@ -189,12 +217,10 @@ bool WaylandInput::sendKeyboardKeymap() {
     }
 
     bool ok = true;
-    if (ftruncate(*fd, static_cast<off_t>(size)) != 0) {
+    if (ftruncate(*fd, static_cast<off_t>(size)) != 0)
         ok = false;
-    } else {
-        const auto written = write(*fd, keymapText, size);
-        ok = written == static_cast<ssize_t>(size);
-    }
+    else
+        ok = writeAll(*fd, keymapText, size);
 
     free(keymapText);
 
@@ -206,26 +232,38 @@ bool WaylandInput::sendKeyboardKeymap() {
     }
 
     zwp_virtual_keyboard_v1_keymap(m_keyboard, kKeyboardKeymapFormatXkbV1, *fd, static_cast<std::uint32_t>(size));
-    flush();
+    ok = flush();
     close(*fd);
-    return true;
+    return ok;
 }
 
 bool WaylandInput::pointerMotion(double dx, double dy) {
+    const auto safeDx = security::boundedFinite(dx, security::kMaxPointerDelta);
+    const auto safeDy = security::boundedFinite(dy, security::kMaxPointerDelta);
+    if (!safeDx || !safeDy) {
+        setError(QStringLiteral("invalid pointer motion delta"));
+        return false;
+    }
     if (!ensureReady())
         return false;
-    zwlr_virtual_pointer_v1_motion(m_pointer, timeMs(), wl_fixed_from_double(dx), wl_fixed_from_double(dy));
+    zwlr_virtual_pointer_v1_motion(m_pointer, timeMs(), wl_fixed_from_double(*safeDx), wl_fixed_from_double(*safeDy));
     zwlr_virtual_pointer_v1_frame(m_pointer);
     return flush();
 }
 
 bool WaylandInput::pointerMotionAbsolute(double x, double y) {
+    const auto safeX = security::boundedFinite(x, security::kMaxAbsoluteCoordinate);
+    const auto safeY = security::boundedFinite(y, security::kMaxAbsoluteCoordinate);
+    if (!safeX || !safeY) {
+        setError(QStringLiteral("invalid absolute pointer coordinates"));
+        return false;
+    }
     if (!ensureReady())
         return false;
 
     const QRect bounds = outputBounds();
-    const auto clampedX = std::clamp<int>(static_cast<int>(x - bounds.x()), 0, std::max(1, bounds.width()));
-    const auto clampedY = std::clamp<int>(static_cast<int>(y - bounds.y()), 0, std::max(1, bounds.height()));
+    const auto clampedX = static_cast<int>(std::clamp(*safeX - bounds.x(), 0.0, static_cast<double>(std::max(1, bounds.width()))));
+    const auto clampedY = static_cast<int>(std::clamp(*safeY - bounds.y(), 0.0, static_cast<double>(std::max(1, bounds.height()))));
 
     zwlr_virtual_pointer_v1_motion_absolute(m_pointer,
                                             timeMs(),
@@ -238,6 +276,10 @@ bool WaylandInput::pointerMotionAbsolute(double x, double y) {
 }
 
 bool WaylandInput::pointerButton(std::uint32_t button, bool pressed) {
+    if (!security::isAllowedPointerButton(button)) {
+        setError(QStringLiteral("invalid pointer button"));
+        return false;
+    }
     if (!ensureReady())
         return false;
     zwlr_virtual_pointer_v1_button(m_pointer, timeMs(), button, pressed ? kPointerButtonPressed : kPointerButtonReleased);
@@ -246,22 +288,30 @@ bool WaylandInput::pointerButton(std::uint32_t button, bool pressed) {
 }
 
 bool WaylandInput::pointerAxis(double dx, double dy) {
+    const auto safeDx = security::boundedFinite(dx, security::kMaxAxisDelta);
+    const auto safeDy = security::boundedFinite(dy, security::kMaxAxisDelta);
+    if (!safeDx || !safeDy) {
+        setError(QStringLiteral("invalid pointer axis delta"));
+        return false;
+    }
     if (!ensureReady())
         return false;
 
-    if (dx != 0.0) {
-        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisHorizontal, wl_fixed_from_double(dx));
+    if (*safeDx != 0.0) {
+        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisHorizontal, wl_fixed_from_double(*safeDx));
     }
-    if (dy != 0.0) {
-        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisVertical, wl_fixed_from_double(dy));
+    if (*safeDy != 0.0) {
+        zwlr_virtual_pointer_v1_axis(m_pointer, timeMs(), kPointerAxisVertical, wl_fixed_from_double(*safeDy));
     }
     zwlr_virtual_pointer_v1_frame(m_pointer);
     return flush();
 }
 
 bool WaylandInput::keyboardKeycode(std::uint32_t keycode, bool pressed) {
-    if (!keycode)
-        return true;
+    if (!security::isAllowedKeyboardKeycode(keycode)) {
+        setError(QStringLiteral("invalid keyboard keycode"));
+        return false;
+    }
     if (!ensureReady())
         return false;
 
@@ -270,6 +320,10 @@ bool WaylandInput::keyboardKeycode(std::uint32_t keycode, bool pressed) {
 }
 
 bool WaylandInput::keyboardKeysym(std::uint32_t keysym, bool pressed) {
+    if (!security::isAllowedKeysym(keysym)) {
+        setError(QStringLiteral("invalid keyboard keysym"));
+        return false;
+    }
     const auto resolved = m_keyResolver.resolveKeysym(static_cast<xkb_keysym_t>(keysym));
     if (!resolved) {
         qWarning() << "failed to resolve keysym" << keysym;
@@ -277,18 +331,36 @@ bool WaylandInput::keyboardKeysym(std::uint32_t keysym, bool pressed) {
     }
 
     if (pressed) {
-        if (resolved->needsShift)
-            keyboardKeycode(KEY_LEFTSHIFT, true);
-        const bool ok = keyboardKeycode(resolved->evdevKeycode, true);
-        m_keysymShiftState.insert(keysym, resolved->needsShift);
-        return ok;
+        const bool shouldPressShift = resolved->needsShift && m_shiftedKeysDown == 0;
+        if (shouldPressShift && !keyboardKeycode(KEY_LEFTSHIFT, true))
+            return false;
+        if (!keyboardKeycode(resolved->evdevKeycode, true)) {
+            if (shouldPressShift)
+                keyboardKeycode(KEY_LEFTSHIFT, false);
+            return false;
+        }
+        if (resolved->needsShift) {
+            ++m_shiftedKeysDown;
+            m_keysymShiftCounts.insert(keysym, m_keysymShiftCounts.value(keysym) + 1);
+        }
+        return true;
     }
 
     const bool ok = keyboardKeycode(resolved->evdevKeycode, false);
-    const bool hadShift = m_keysymShiftState.take(keysym);
-    if (hadShift)
-        keyboardKeycode(KEY_LEFTSHIFT, false);
-    return ok;
+    bool shiftOk = true;
+    auto shifted = m_keysymShiftCounts.find(keysym);
+    if (shifted != m_keysymShiftCounts.end()) {
+        --m_shiftedKeysDown;
+        if (*shifted <= 1)
+            m_keysymShiftCounts.erase(shifted);
+        else
+            --(*shifted);
+        if (m_shiftedKeysDown <= 0) {
+            m_shiftedKeysDown = 0;
+            shiftOk = keyboardKeycode(KEY_LEFTSHIFT, false);
+        }
+    }
+    return ok && shiftOk;
 }
 
 std::uint32_t WaylandInput::timeMs() const {
@@ -370,7 +442,8 @@ void WaylandInput::handleGlobal(void* data, wl_registry* registry, std::uint32_t
             static_cast<zwp_virtual_keyboard_manager_v1*>(wl_registry_bind(registry, name, &zwp_virtual_keyboard_manager_v1_interface, self->m_keyboardManagerVersion));
     } else if (iface == QStringLiteral("wl_output") && !self->m_output) {
         self->m_output = static_cast<wl_output*>(wl_registry_bind(registry, name, &wl_output_interface, std::min<std::uint32_t>(version, 4)));
-        wl_output_add_listener(self->m_output, &kOutputListener, self);
+        if (self->m_output)
+            wl_output_add_listener(self->m_output, &kOutputListener, self);
     }
 }
 

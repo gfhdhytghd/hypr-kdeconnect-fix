@@ -1,4 +1,4 @@
 [portal]
 DBusName=org.freedesktop.impl.portal.desktop.hypr_kdeconnect
 Interfaces=org.freedesktop.impl.portal.RemoteDesktop;
-UseIn=Hyprland;
+UseIn=@HKCF_PORTAL_USE_IN@;
