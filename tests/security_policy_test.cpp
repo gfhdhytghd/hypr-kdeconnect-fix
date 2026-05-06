@@ -23,13 +23,21 @@ int main() {
 
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect")), "KDE Connect base app id should be allowed");
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect.daemon")), "KDE Connect daemon app id should be allowed");
-    failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("surface-transient")), "known KDE Connect transient fallback should be allowed");
+    failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("surface-transient")), "transient fallback should require caller verification");
+    failures += expect(hkcf::security::needsKdeConnectCallerFallback(QStringLiteral("surface-transient")),
+                       "known KDE Connect transient fallback should use caller verification");
+    failures += expect(hkcf::security::needsKdeConnectCallerFallback(QString()), "empty app id should use caller verification");
     failures += expect(!hkcf::security::isAllowedAppId(QString()), "empty app id should be denied");
     failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("evil.kdeconnect")), "substring app id spoof should be denied");
     failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect.evil")), "unknown KDE Connect-like suffix should be denied");
 
     failures += expect(hkcf::security::isValidSessionPath(QStringLiteral("/org/freedesktop/portal/desktop/session/app/token")),
                        "valid portal session path should be accepted");
+    failures += expect(hkcf::security::senderBusNameFromSessionPath(QStringLiteral("/org/freedesktop/portal/desktop/session/1_19/token")).value_or(QString()) ==
+                           QStringLiteral(":1.19"),
+                       "xdg-desktop-portal session sender segment should decode to a D-Bus unique name");
+    failures += expect(!hkcf::security::senderBusNameFromSessionPath(QStringLiteral("/org/freedesktop/portal/desktop/session/org_kde_kdeconnect/token")),
+                       "non-unique-name session sender segment should not decode to a D-Bus name");
     failures += expect(!hkcf::security::isValidSessionPath(QStringLiteral("/org/freedesktop/portal/desktop/request/app/token")),
                        "request path should not be accepted as a session");
     failures += expect(!hkcf::security::isValidSessionPath(QStringLiteral("/org/freedesktop/portal/desktop/session/")),
@@ -57,6 +65,12 @@ int main() {
     failures += expect(hkcf::security::clampDiscreteScrollSteps(-500) == -hkcf::security::kMaxDiscreteScrollSteps, "scroll steps should clamp low");
     failures += expect(hkcf::security::kNotifyRateWindowMs > 0 && hkcf::security::kMaxNotifyEventsPerWindow > 0,
                        "notify rate limits should be positive");
+    failures += expect(hkcf::security::isAllowedFallbackExecutablePath(QStringLiteral("/usr/bin/kdeconnectd")),
+                       "system KDE Connect daemon should be allowed as an app-id fallback");
+    failures += expect(!hkcf::security::isAllowedFallbackExecutablePath(QStringLiteral("kdeconnectd")),
+                       "bare executable names should not be allowed as an app-id fallback");
+    failures += expect(!hkcf::security::isAllowedFallbackExecutablePath(QStringLiteral("/tmp/kdeconnectd")),
+                       "generic D-Bus clients should not be allowed as an app-id fallback");
 
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

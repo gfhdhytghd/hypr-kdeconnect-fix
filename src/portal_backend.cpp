@@ -15,6 +15,8 @@
 #include <QDBusUnixFileDescriptor>
 #include <QDBusVariant>
 #include <QDebug>
+#include <QFileInfo>
+#include <QTimer>
 
 namespace hkcf {
 
@@ -28,6 +30,7 @@ constexpr auto kIntrospectableInterface = "org.freedesktop.DBus.Introspectable";
 constexpr auto kPeerInterface = "org.freedesktop.DBus.Peer";
 constexpr auto kNotSupported = "org.freedesktop.DBus.Error.NotSupported";
 constexpr auto kPortalFrontendService = "org.freedesktop.portal.Desktop";
+constexpr int kPortalRequestResponseDelayMs = 75;
 
 template <typename T>
 std::optional<T> typedArg(const QList<QVariant>& args, int index) {
@@ -97,6 +100,37 @@ std::optional<double> boundedDoubleArg(const QList<QVariant>& args, int index, d
     if (!value)
         return std::nullopt;
     return hkcf::security::boundedFinite(*value, maxAbs);
+}
+
+QString executablePathForBusService(const QDBusConnection& connection, const QString& serviceName) {
+    QDBusConnectionInterface* bus = connection.interface();
+    if (!bus || serviceName.isEmpty())
+        return {};
+
+    const QDBusReply<uint> pid = bus->servicePid(serviceName);
+    if (!pid.isValid() || pid.value() == 0)
+        return {};
+
+    return QFileInfo(QStringLiteral("/proc/%1/exe").arg(pid.value())).symLinkTarget();
+}
+
+bool serviceOwnsKdeConnectName(const QDBusConnection& connection, const QString& serviceName) {
+    QDBusConnectionInterface* bus = connection.interface();
+    if (!bus || serviceName.isEmpty())
+        return false;
+
+    for (const QString& kdeConnectName : {QStringLiteral("org.kde.kdeconnect"), QStringLiteral("org.kde.kdeconnect.daemon")}) {
+        const QDBusReply<QString> owner = bus->serviceOwner(kdeConnectName);
+        if (owner.isValid() && owner.value() == serviceName)
+            return true;
+    }
+    return false;
+}
+
+void sendPortalRequestResponse(const QDBusConnection& connection, const QDBusMessage& response) {
+    QTimer::singleShot(kPortalRequestResponseDelayMs, [connection, response]() {
+        connection.send(response);
+    });
 }
 
 } // namespace
@@ -298,7 +332,7 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
         QVariantMap results;
         results.insert(QStringLiteral("session"), path);
         results.insert(QStringLiteral("session_id"), path);
-        connection.send(response(message, 0, results));
+        sendPortalRequestResponse(connection, response(message, 0, results));
         return true;
     }
 
@@ -312,7 +346,7 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
 
         auto session = m_sessions.find(sessionHandle->path());
         if (session == m_sessions.end()) {
-            connection.send(response(message, 2));
+            sendPortalRequestResponse(connection, response(message, 2));
             return true;
         }
         if (!isSessionOwner(message, *session)) {
@@ -328,11 +362,11 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
 
         session->requestedTypes = *requestedTypes & kSupportedDevices;
         if (!session->requestedTypes) {
-            connection.send(response(message, 2, {{QStringLiteral("error"), QStringLiteral("no supported devices selected")}}));
+            sendPortalRequestResponse(connection, response(message, 2, {{QStringLiteral("error"), QStringLiteral("no supported devices selected")}}));
             return true;
         }
         session->devicesSelected = true;
-        connection.send(response(message, 0));
+        sendPortalRequestResponse(connection, response(message, 0));
         return true;
     }
 
@@ -347,7 +381,7 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
 
         auto session = m_sessions.find(sessionHandle->path());
         if (session == m_sessions.end()) {
-            connection.send(response(message, 2));
+            sendPortalRequestResponse(connection, response(message, 2));
             return true;
         }
         if (!isSessionOwner(message, *session)) {
@@ -356,14 +390,14 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
         }
 
         if (!session->devicesSelected) {
-            connection.send(response(message, 2, {{QStringLiteral("error"), QStringLiteral("devices were not selected")}}));
+            sendPortalRequestResponse(connection, response(message, 2, {{QStringLiteral("error"), QStringLiteral("devices were not selected")}}));
             return true;
         }
         if (!appId->isEmpty())
             session->appId = security::normalizedAppId(*appId);
-        if (!isAllowedApp(session->appId)) {
+        if (!isAllowedApp(session->appId, sessionHandle->path(), connection)) {
             qWarning() << "refusing RemoteDesktop session for app id" << safeForLog(session->appId);
-            connection.send(response(message, 1, {{QStringLiteral("error"), QStringLiteral("app id is not allowed")}}));
+            sendPortalRequestResponse(connection, response(message, 1, {{QStringLiteral("error"), QStringLiteral("app id is not allowed")}}));
             return true;
         }
         if (!ensureInputReady(message, connection))
@@ -373,7 +407,7 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
         QVariantMap results;
         results.insert(QStringLiteral("devices"), session->requestedTypes & kSupportedDevices);
         results.insert(QStringLiteral("clipboard_enabled"), false);
-        connection.send(response(message, 0, results));
+        sendPortalRequestResponse(connection, response(message, 0, results));
         return true;
     }
 
@@ -395,7 +429,7 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
         }
         if (!appId->isEmpty())
             session->appId = security::normalizedAppId(*appId);
-        if (!isAllowedApp(session->appId)) {
+        if (!isAllowedApp(session->appId, sessionHandle->path(), connection)) {
             connection.send(error(message, QDBusError::AccessDenied, QStringLiteral("app id is not allowed")));
             return true;
         }
@@ -641,7 +675,7 @@ bool PortalBackend::ensureInputReady(const QDBusMessage& message, const QDBusCon
     if (m_input.ensureReady())
         return true;
     qWarning() << "failed to initialize Wayland input:" << m_input.lastError();
-    connection.send(response(message, 2, {{QStringLiteral("error"), QStringLiteral("input backend unavailable")}}));
+    sendPortalRequestResponse(connection, response(message, 2, {{QStringLiteral("error"), QStringLiteral("input backend unavailable")}}));
     return false;
 }
 
@@ -671,8 +705,26 @@ bool PortalBackend::checkNotifyRate(const QDBusMessage& message, const QDBusConn
     return false;
 }
 
-bool PortalBackend::isAllowedApp(const QString& appId) const {
-    return security::isAllowedAppId(appId);
+bool PortalBackend::isAllowedApp(const QString& appId, const QString& sessionPath, const QDBusConnection& connection) const {
+    if (security::isAllowedAppId(appId))
+        return true;
+
+    if (!security::needsKdeConnectCallerFallback(appId))
+        return false;
+
+    const auto senderBusName = security::senderBusNameFromSessionPath(sessionPath);
+    if (!senderBusName)
+        return false;
+
+    if (!serviceOwnsKdeConnectName(connection, *senderBusName))
+        return false;
+
+    const QString executablePath = executablePathForBusService(connection, *senderBusName);
+    if (!security::isAllowedFallbackExecutablePath(executablePath))
+        return false;
+
+    qInfo() << "allowing RemoteDesktop session with fallback app id" << safeForLog(appId) << "from" << executablePath << *senderBusName;
+    return true;
 }
 
 bool PortalBackend::isTrustedPortalCaller(const QDBusMessage& message, const QDBusConnection& connection) const {

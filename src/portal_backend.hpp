@@ -38,7 +38,7 @@ class PortalBackend : public QDBusVirtualObject {
     static constexpr std::uint32_t kPointer = 2;
     static constexpr std::uint32_t kSupportedDevices = kKeyboard | kPointer;
 
-    [[nodiscard]] bool isAllowedApp(const QString& appId) const;
+    [[nodiscard]] bool isAllowedApp(const QString& appId, const QString& sessionPath, const QDBusConnection& connection) const;
     [[nodiscard]] bool isTrustedPortalCaller(const QDBusMessage& message, const QDBusConnection& connection) const;
     [[nodiscard]] bool isSessionOwner(const QDBusMessage& message, const Session& session) const;
     [[nodiscard]] bool isSessionPath(const QString& path) const;

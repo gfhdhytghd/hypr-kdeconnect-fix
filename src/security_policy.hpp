@@ -12,6 +12,7 @@
 
 namespace hkcf::security {
 
+constexpr auto kSessionPathPrefix = "/org/freedesktop/portal/desktop/session/";
 constexpr qsizetype kMaxAppIdLength = 128;
 constexpr qsizetype kMaxSessionPathLength = 256;
 constexpr qsizetype kMaxSessions = 8;
@@ -33,8 +34,12 @@ inline bool isAllowedAppId(const QString& appId) {
 
     return normalized == QStringLiteral("org.kde.kdeconnect") || normalized == QStringLiteral("org.kde.kdeconnect.app") ||
            normalized == QStringLiteral("org.kde.kdeconnect.daemon") || normalized == QStringLiteral("org.kde.kdeconnect.handler") ||
-           normalized == QStringLiteral("org.kde.kdeconnect.nonplasma") || normalized == QStringLiteral("org.kde.kdeconnect.sms") ||
-           normalized == QStringLiteral("surface-transient");
+           normalized == QStringLiteral("org.kde.kdeconnect.nonplasma") || normalized == QStringLiteral("org.kde.kdeconnect.sms");
+}
+
+inline bool needsKdeConnectCallerFallback(const QString& appId) {
+    const QString normalized = normalizedAppId(appId);
+    return normalized.isEmpty() || normalized == QStringLiteral("surface-transient");
 }
 
 inline bool isPlausibleAppId(const QString& appId) {
@@ -42,8 +47,36 @@ inline bool isPlausibleAppId(const QString& appId) {
 }
 
 inline bool isValidSessionPath(const QString& path) {
-    static const QString prefix = QStringLiteral("/org/freedesktop/portal/desktop/session/");
+    static const QString prefix = QString::fromLatin1(kSessionPathPrefix);
     return path.size() > prefix.size() && path.size() <= kMaxSessionPathLength && path.startsWith(prefix) && !path.contains(QStringLiteral("//"));
+}
+
+inline std::optional<QString> senderBusNameFromSessionPath(const QString& path) {
+    if (!isValidSessionPath(path))
+        return std::nullopt;
+
+    static const QString prefix = QString::fromLatin1(kSessionPathPrefix);
+    const qsizetype senderStart = prefix.size();
+    const qsizetype senderEnd = path.indexOf(QLatin1Char('/'), senderStart);
+    if (senderEnd <= senderStart)
+        return std::nullopt;
+
+    QString encoded = path.mid(senderStart, senderEnd - senderStart);
+    if (!encoded.contains(QLatin1Char('_')) || !encoded.at(0).isDigit())
+        return std::nullopt;
+
+    for (const QChar ch : encoded) {
+        if (!ch.isDigit() && ch != QLatin1Char('_'))
+            return std::nullopt;
+    }
+
+    encoded.replace(QLatin1Char('_'), QLatin1Char('.'));
+    return QStringLiteral(":%1").arg(encoded);
+}
+
+inline bool isAllowedFallbackExecutablePath(const QString& executablePath) {
+    return executablePath == QStringLiteral("/usr/bin/kdeconnectd") || executablePath == QStringLiteral("/usr/lib/kdeconnectd") ||
+           executablePath == QStringLiteral("/usr/libexec/kdeconnectd");
 }
 
 inline std::optional<double> boundedFinite(double value, double maxAbs) {
