@@ -77,6 +77,64 @@ ctest --test-dir build --output-on-failure
 cmake --install build
 ```
 
+With Nix flakes:
+
+```sh
+nix build
+nix flake check -L
+```
+
+Install the flake package into a user or system profile when you want the raw
+package without the NixOS module:
+
+```sh
+nix profile install .#
+```
+
+The flake also provides a development shell with the CMake and Qt dependencies:
+
+```sh
+nix develop
+```
+
+NixOS flake example:
+
+```nix
+{
+  inputs.hypr-kdeconnect-fix.url = "github:danbulant/hypr-kdeconnect-fix";
+
+  outputs = { nixpkgs, hypr-kdeconnect-fix, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        hypr-kdeconnect-fix.nixosModules.default
+        {
+          services.hypr-kdeconnect-fix.enable = true;
+        }
+      ];
+    };
+  };
+}
+```
+
+By default, the NixOS module installs the package, enables `xdg.portal`, adds the
+backend to `xdg.portal.extraPortals`, and routes only
+`org.freedesktop.impl.portal.RemoteDesktop` to `hypr-kdeconnect`. Keep your
+existing portal defaults for screenshots, screencast, file chooser, and other
+interfaces in `xdg.portal.config` or your desktop environment module.
+
+If your compositor uses a different `XDG_CURRENT_DESKTOP` id, set it through the
+module before rebuilding:
+
+```nix
+services.hypr-kdeconnect-fix = {
+  enable = true;
+  portalUseIn = [ "Hyprland" "your-desktop-id" ];
+};
+```
+
+Note: Flake was tested only on NixOS x86_64 on Hyprland.
+
 This installs:
 
 - `~/.local/bin/hypr-kdeconnect-portal`
