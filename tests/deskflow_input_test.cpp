@@ -52,32 +52,42 @@ void testEis() {
     ei_device* keyboard = nullptr;
     ei_device* pointer = nullptr;
     ei_device* absolute = nullptr;
+    ei* secondClient = nullptr;
+    ei_device* secondKeyboard = nullptr;
     bool disconnected = false;
     const auto pump = [&] {
         QCoreApplication::processEvents();
-        if (!client) return;
-        ei_dispatch(client);
-        while (auto* event = ei_get_event(client)) {
-            auto* device = ei_event_get_device(event);
-            switch (ei_event_get_type(event)) {
-            case EI_EVENT_SEAT_ADDED:
-                ei_seat_bind_capabilities(ei_event_get_seat(event), EI_DEVICE_CAP_KEYBOARD,
-                    EI_DEVICE_CAP_POINTER, EI_DEVICE_CAP_POINTER_ABSOLUTE,
-                    EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_SCROLL, nullptr);
-                break;
-            case EI_EVENT_DEVICE_RESUMED:
-                if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD) && !keyboard)
-                    keyboard = ei_device_ref(device);
-                if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER) && !pointer)
-                    pointer = ei_device_ref(device);
-                if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER_ABSOLUTE) && !absolute)
-                    absolute = ei_device_ref(device);
-                ei_device_start_emulating(device, 1);
-                break;
-            case EI_EVENT_DISCONNECT: disconnected = true; break;
-            default: break;
+        for (auto* activeClient : {client, secondClient}) {
+            if (!activeClient) continue;
+            ei_dispatch(activeClient);
+            while (auto* event = ei_get_event(activeClient)) {
+                auto* device = ei_event_get_device(event);
+                switch (ei_event_get_type(event)) {
+                case EI_EVENT_SEAT_ADDED:
+                    ei_seat_bind_capabilities(ei_event_get_seat(event), EI_DEVICE_CAP_KEYBOARD,
+                        EI_DEVICE_CAP_POINTER, EI_DEVICE_CAP_POINTER_ABSOLUTE,
+                        EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_SCROLL, nullptr);
+                    break;
+                case EI_EVENT_DEVICE_RESUMED:
+                    if (activeClient == secondClient) {
+                        if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD) && !secondKeyboard)
+                            secondKeyboard = ei_device_ref(device);
+                        ei_device_start_emulating(device, 1);
+                        break;
+                    }
+                    if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD) && !keyboard)
+                        keyboard = ei_device_ref(device);
+                    if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER) && !pointer)
+                        pointer = ei_device_ref(device);
+                    if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER_ABSOLUTE) && !absolute)
+                        absolute = ei_device_ref(device);
+                    ei_device_start_emulating(device, 1);
+                    break;
+                case EI_EVENT_DISCONNECT: disconnected = true; break;
+                default: break;
+                }
+                ei_event_unref(event);
             }
-            ei_event_unref(event);
         }
     };
     const auto waitFor = [&](auto condition, const char* message) {
@@ -113,6 +123,85 @@ void testEis() {
     ei_device_scroll_discrete(pointer, 0, -90);
     ei_device_frame(pointer, ei_now(client));
     wheel(0, 120, 0, 1);
+    // A motion on the same connection is a barrier for all preceding events,
+    // including transitions that must not produce an event in the sink.
+    double barrierX = 500;
+    const auto sync = [&] {
+        ++barrierX;
+        ei_device_pointer_motion_absolute(absolute, barrierX, 300);
+        ei_device_frame(absolute, ei_now(client));
+        waitFor([&] { return absoluteX == barrierX; }, "input barrier");
+    };
+    for (bool cancel : {false, true}) {
+        for (bool stopX : {false, true}) {
+            ei_device_scroll_discrete(pointer, 60, 60);
+            ei_device_frame(pointer, ei_now(client));
+            if (cancel)
+                ei_device_scroll_cancel(pointer, stopX, !stopX);
+            else
+                ei_device_scroll_stop(pointer, stopX, !stopX);
+            ei_device_frame(pointer, ei_now(client));
+            sync();
+            auto before = scrolls.size();
+            // The other axis retains its half-notch.
+            wheel(stopX ? 0 : 60, stopX ? 60 : 0, stopX ? 0 : 1, 1);
+            check(scrolls.size() == before + 1, "preserve active axis remainder");
+            before = scrolls.size();
+            ei_device_scroll_discrete(pointer, stopX ? 60 : 0, stopX ? 0 : 60);
+            ei_device_frame(pointer, ei_now(client));
+            sync();
+            check(scrolls.size() == before, "new gesture must not inherit stopped or cancelled remainder");
+            wheel(stopX ? 60 : 0, stopX ? 0 : 60, stopX ? 1 : 0, 1);
+        }
+    }
+    for (bool stop : {false, true}) {
+        ei_device_button_button(pointer, BTN_LEFT, true);
+        ei_device_frame(pointer, ei_now(client));
+        ei_device_button_button(absolute, BTN_LEFT, true);
+        ei_device_frame(absolute, ei_now(client));
+        sync();
+        check(buttons.contains(BTN_LEFT), "shared button press");
+        if (stop)
+            ei_device_stop_emulating(pointer);
+        else {
+            ei_device_button_button(pointer, BTN_LEFT, false);
+            ei_device_frame(pointer, ei_now(client));
+        }
+        sync();
+        check(buttons.contains(BTN_LEFT), "one device must not release another device's button");
+        ei_device_button_button(absolute, BTN_LEFT, false);
+        ei_device_frame(absolute, ei_now(client));
+        sync();
+        check(buttons.isEmpty(), "last holder releases button");
+        if (stop) {
+            ei_device_start_emulating(pointer, 2);
+            // libei retains the sender's button state across emulation stops.
+            ei_device_button_button(pointer, BTN_LEFT, false);
+            ei_device_frame(pointer, ei_now(client));
+            sync();
+        }
+    }
+    const auto secondFd = bridge.addClient(&error);
+    check(secondFd.has_value(), "create second client");
+    secondClient = ei_new_sender(nullptr);
+    check(ei_setup_backend_fd(secondClient, *secondFd) == 0, "connect second client");
+    waitFor([&] { return secondKeyboard != nullptr; }, "second keyboard discovery");
+    ei_device_keyboard_key(secondKeyboard, KEY_LEFTCTRL, true);
+    ei_device_keyboard_key(secondKeyboard, KEY_B, true);
+    ei_device_frame(secondKeyboard, ei_now(secondClient));
+    waitFor([&] { return keys.contains(KEY_B); }, "second client holds control");
+    ei_device_keyboard_key(keyboard, KEY_LEFTCTRL, true);
+    ei_device_frame(keyboard, ei_now(client));
+    sync();
+    ei_device_unref(secondKeyboard);
+    secondKeyboard = nullptr;
+    secondClient = ei_unref(secondClient);
+    waitFor([&] { return !keys.contains(KEY_B); }, "second client disconnect processed");
+    check(keys.contains(KEY_LEFTCTRL), "disconnect must preserve another client's held modifier");
+    ei_device_keyboard_key(keyboard, KEY_LEFTCTRL, false);
+    ei_device_frame(keyboard, ei_now(client));
+    sync();
+    check(keys.isEmpty(), "last holder releases modifier");
     ei_device_keyboard_key(keyboard, KEY_LEFTSHIFT, true);
     ei_device_keyboard_key(keyboard, KEY_A, true);
     ei_device_frame(keyboard, ei_now(client));

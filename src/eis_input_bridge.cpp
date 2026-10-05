@@ -129,6 +129,28 @@ void configureRegion(eis_device* device, const QRect& bounds) {
     eis_region_unref(region);
 }
 
+using PressedInputs = QHash<eis_device*, QSet<std::uint32_t>>;
+
+bool isInputPressed(const PressedInputs& inputs, std::uint32_t code) {
+    return std::any_of(inputs.cbegin(), inputs.cend(), [code](const auto& held) { return held.contains(code); });
+}
+
+// All EIS devices share one Wayland sink. Only forward aggregate transitions.
+bool updatePressedInput(PressedInputs& inputs, eis_device* device, std::uint32_t code, bool pressed) {
+    const bool wasPressed = isInputPressed(inputs, code);
+    if (pressed) {
+        inputs[device].insert(code);
+    } else {
+        auto it = inputs.find(device);
+        if (it != inputs.end()) {
+            it->remove(code);
+            if (it->isEmpty())
+                inputs.erase(it);
+        }
+    }
+    return wasPressed != isInputPressed(inputs, code);
+}
+
 int wheelStep(double delta) {
     if (!std::isfinite(delta) || delta == 0.0)
         return 0;
@@ -219,6 +241,7 @@ void EisInputBridge::handleEvent(eis_event* event) {
     case EIS_EVENT_SCROLL_DELTA:
     case EIS_EVENT_SCROLL_DISCRETE:
     case EIS_EVENT_SCROLL_STOP:
+    case EIS_EVENT_SCROLL_CANCEL:
     case EIS_EVENT_KEYBOARD_KEY:
         handleInputEvent(event);
         break;
@@ -232,7 +255,6 @@ void EisInputBridge::handleEvent(eis_event* event) {
     case EIS_EVENT_FRAME:
     case EIS_EVENT_DEVICE_START_EMULATING:
     case EIS_EVENT_PONG:
-    case EIS_EVENT_SCROLL_CANCEL:
     case EIS_EVENT_TOUCH_DOWN:
     case EIS_EVENT_TOUCH_UP:
     case EIS_EVENT_TOUCH_MOTION:
@@ -321,11 +343,9 @@ void EisInputBridge::handleInputEvent(eis_event* event) {
         m_input.pointerMotionAbsolute(eis_event_pointer_get_absolute_x(event), eis_event_pointer_get_absolute_y(event));
         break;
     case EIS_EVENT_BUTTON_BUTTON:
-        if (eis_event_button_get_is_press(event))
-            m_pressedButtons[eis_event_get_device(event)].insert(eis_event_button_get_button(event));
-        else
-            m_pressedButtons[eis_event_get_device(event)].remove(eis_event_button_get_button(event));
-        m_input.pointerButton(eis_event_button_get_button(event), eis_event_button_get_is_press(event));
+        if (updatePressedInput(m_pressedButtons, eis_event_get_device(event),
+                               eis_event_button_get_button(event), eis_event_button_get_is_press(event)))
+            m_input.pointerButton(eis_event_button_get_button(event), eis_event_button_get_is_press(event));
         break;
     case EIS_EVENT_SCROLL_DELTA:
         if (const int x = wheelStep(eis_event_scroll_get_dx(event)); x != 0)
@@ -351,18 +371,26 @@ void EisInputBridge::handleInputEvent(eis_event* event) {
         break;
     }
     case EIS_EVENT_SCROLL_STOP:
-        m_scrollRemainders.remove(eis_event_get_device(event));
-        if (eis_event_scroll_get_stop_x(event))
+    case EIS_EVENT_SCROLL_CANCEL: {
+        auto it = m_scrollRemainders.find(eis_event_get_device(event));
+        if (eis_event_scroll_get_stop_x(event)) {
+            if (it != m_scrollRemainders.end())
+                it->first = 0;
             m_input.pointerAxisDiscrete(1, 0);
-        if (eis_event_scroll_get_stop_y(event))
+        }
+        if (eis_event_scroll_get_stop_y(event)) {
+            if (it != m_scrollRemainders.end())
+                it->second = 0;
             m_input.pointerAxisDiscrete(0, 0);
+        }
+        if (it != m_scrollRemainders.end() && it->first == 0 && it->second == 0)
+            m_scrollRemainders.erase(it);
         break;
+    }
     case EIS_EVENT_KEYBOARD_KEY:
-        if (eis_event_keyboard_get_key_is_press(event))
-            m_pressedKeys[eis_event_get_device(event)].insert(eis_event_keyboard_get_key(event));
-        else
-            m_pressedKeys[eis_event_get_device(event)].remove(eis_event_keyboard_get_key(event));
-        m_input.keyboardKeycode(eis_event_keyboard_get_key(event), eis_event_keyboard_get_key_is_press(event));
+        if (updatePressedInput(m_pressedKeys, eis_event_get_device(event),
+                               eis_event_keyboard_get_key(event), eis_event_keyboard_get_key_is_press(event)))
+            m_input.keyboardKeycode(eis_event_keyboard_get_key(event), eis_event_keyboard_get_key_is_press(event));
         break;
     default:
         break;
@@ -440,10 +468,14 @@ eis_device* EisInputBridge::addAbsolutePointer(eis_seat* seat) {
 }
 
 void EisInputBridge::releaseInput(eis_device* device) {
-    for (const auto key : m_pressedKeys.take(device))
-        m_input.keyboardKeycode(key, false);
-    for (const auto button : m_pressedButtons.take(device))
-        m_input.pointerButton(button, false);
+    for (const auto key : m_pressedKeys.take(device)) {
+        if (!isInputPressed(m_pressedKeys, key))
+            m_input.keyboardKeycode(key, false);
+    }
+    for (const auto button : m_pressedButtons.take(device)) {
+        if (!isInputPressed(m_pressedButtons, button))
+            m_input.pointerButton(button, false);
+    }
     m_scrollRemainders.remove(device);
 }
 
