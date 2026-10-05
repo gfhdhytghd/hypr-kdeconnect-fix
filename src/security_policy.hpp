@@ -32,7 +32,8 @@ inline bool isAllowedAppId(const QString& appId) {
     if (normalized.isEmpty() || normalized.size() > kMaxAppIdLength)
         return false;
 
-    return normalized == QStringLiteral("org.kde.kdeconnect") || normalized == QStringLiteral("org.kde.kdeconnect.app") ||
+    return normalized == QStringLiteral("org.deskflow.deskflow") ||
+           normalized == QStringLiteral("org.kde.kdeconnect") || normalized == QStringLiteral("org.kde.kdeconnect.app") ||
            normalized == QStringLiteral("org.kde.kdeconnect.daemon") || normalized == QStringLiteral("org.kde.kdeconnect.handler") ||
            normalized == QStringLiteral("org.kde.kdeconnect.nonplasma") || normalized == QStringLiteral("org.kde.kdeconnect.sms");
 }
@@ -79,27 +80,22 @@ inline bool isAllowedFallbackExecutablePath(const QString& executablePath) {
            executablePath == QStringLiteral("/usr/libexec/kdeconnectd");
 }
 
-// K&K: Deskflow (deskflow-core) hat keinen KDE-Connect-D-Bus-Namen, den man
-// gegenpruefen koennte. Der /proc/PID/exe-Pfad selbst ist bereits faelschungssicher
-// (kein Prozess kann einen fremden Pfad vorspiegeln), daher reicht er hier allein.
-// Zweiter Fall: ein lokaler Source-Build (fuer Fixes, die noch nicht in der
-// Distro-Paketversion stecken) unter <home>/deskflow-src/build/bin/deskflow-core -
-// gleiche Faelschungssicherheit ueber /proc/PID/exe wie beim Paket-Binary, nur
-// eben ausserhalb von /usr. Auf den Home-Verzeichnis-Namen wird bewusst nicht
-// geprueft, damit das auf jeder Maschine funktioniert.
-inline bool isDeskflowExecutablePath(const QString& executablePath) {
+// Keep packaged Deskflow working and allow one explicitly configured source
+// or user-local installation instead of trusting a build-directory suffix.
+inline bool isDeskflowExecutablePath(const QString& executablePath, const QString& configuredPath = {}) {
     return executablePath == QStringLiteral("/usr/bin/deskflow-core") ||
-           executablePath.endsWith(QStringLiteral("/deskflow-src/build/bin/deskflow-core"));
+           (configuredPath.startsWith('/') && executablePath == configuredPath);
 }
 
 inline bool isAllowedFallbackProcess(const QString& executablePath,
                                      std::uint32_t senderPid,
                                      std::uint32_t kdeConnectOwnerPid,
-                                     std::uint32_t kdeConnectDaemonOwnerPid) {
+                                     std::uint32_t kdeConnectDaemonOwnerPid,
+                                     const QString& deskflowExecutablePath = {}) {
     if (senderPid == 0)
         return false;
 
-    if (isDeskflowExecutablePath(executablePath))
+    if (isDeskflowExecutablePath(executablePath, deskflowExecutablePath))
         return true;
 
     if (!isAllowedFallbackExecutablePath(executablePath))

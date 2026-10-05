@@ -95,7 +95,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core DBus)
 
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client>=1.20)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon>=1.5)
-pkg_check_modules(LIBEIS REQUIRED IMPORTED_TARGET libeis-1.0>=1.4)
+pkg_check_modules(LIBEIS REQUIRED IMPORTED_TARGET libeis-1.0>=1.6)
 
 find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner REQUIRED)
 
@@ -145,6 +145,12 @@ target_link_libraries(hypr-kdeconnect-portal PRIVATE
   PkgConfig::WAYLAND_CLIENT
   PkgConfig::XKBCOMMON
 )
+set(HKCF_DESKFLOW_EXECUTABLE "${CMAKE_INSTALL_PREFIX}/bin/deskflow-core"
+  CACHE FILEPATH "Additional exact Deskflow core executable allowed for native portal sessions"
+)
+target_compile_definitions(hypr-kdeconnect-portal PRIVATE
+  HKCF_DESKFLOW_EXECUTABLE="${HKCF_DESKFLOW_EXECUTABLE}"
+)
 hkcf_apply_target_defaults(hypr-kdeconnect-portal)
 
 if(BUILD_TESTING)
@@ -170,6 +176,23 @@ if(BUILD_TESTING)
   )
   hkcf_apply_target_defaults(security-policy-test)
   add_test(NAME security-policy-test COMMAND security-policy-test)
+
+  pkg_check_modules(LIBEI REQUIRED IMPORTED_TARGET libei-1.0>=1.6)
+  add_executable(deskflow-input-test
+    tests/deskflow_input_test.cpp
+    src/eis_input_bridge.cpp
+    src/key_resolver.cpp
+  )
+  target_include_directories(deskflow-input-test PRIVATE src)
+  target_link_libraries(deskflow-input-test PRIVATE
+    Qt6::Core
+    PkgConfig::LIBEIS
+    PkgConfig::LIBEI
+    PkgConfig::XKBCOMMON
+    PkgConfig::WAYLAND_CLIENT
+  )
+  hkcf_apply_target_defaults(deskflow-input-test)
+  add_test(NAME deskflow-input-test COMMAND deskflow-input-test)
 endif()
 
 configure_file(data/hypr-kdeconnect.portal.in hypr-kdeconnect.portal @ONLY)

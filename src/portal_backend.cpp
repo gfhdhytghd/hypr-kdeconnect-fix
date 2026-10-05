@@ -139,7 +139,8 @@ QString verifiedKdeConnectExecutablePath(const QDBusConnection& connection, cons
     const std::uint32_t kdeConnectDaemonOwnerPid =
         processIdForBusService(connection, QStringLiteral("org.kde.kdeconnect.daemon")).value_or(0);
 
-    if (!security::isAllowedFallbackProcess(executablePath, *senderPid, kdeConnectOwnerPid, kdeConnectDaemonOwnerPid))
+    if (!security::isAllowedFallbackProcess(executablePath, *senderPid, kdeConnectOwnerPid, kdeConnectDaemonOwnerPid,
+                                           QStringLiteral(HKCF_DESKFLOW_EXECUTABLE)))
         return {};
 
     return executablePath;
