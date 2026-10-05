@@ -20,6 +20,25 @@ int expect(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow")), "Deskflow app id should be accepted");
+    failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow.evil")), "Deskflow-like ids should be rejected");
+    const QString expected = QStringLiteral("/home/test/.local/bin/deskflow-core");
+    failures += expect(hkcf::security::isDeskflowExecutablePath(expected, expected), "exact configured Deskflow path should pass");
+    failures += expect(!hkcf::security::isDeskflowExecutablePath(QStringLiteral("/tmp/deskflow-core"), expected), "different binary path should fail");
+    failures += expect(!hkcf::security::isDeskflowExecutablePath(QString(), QString()), "empty binary path should fail");
+    failures += expect(!hkcf::security::isDeskflowExecutablePath(QStringLiteral("deskflow-core"), QStringLiteral("deskflow-core")), "bare executable should fail");
+
+    failures += expect(hkcf::security::isAllowedFallbackProcess(QStringLiteral("/usr/bin/deskflow-core"), 42, 0, 0),
+                       "packaged Deskflow should remain accepted");
+    failures += expect(hkcf::security::isAllowedFallbackProcess(expected, 42, 0, 0, expected),
+                       "configured native Deskflow should pass without KDE ownership");
+    failures += expect(!hkcf::security::isAllowedFallbackProcess(expected, 0, 0, 0, expected),
+                       "configured Deskflow still requires a valid sender pid");
+    const QString sourceBuild = QStringLiteral("/tmp/deskflow-src/build/bin/deskflow-core");
+    failures += expect(!hkcf::security::isAllowedFallbackProcess(sourceBuild, 42, 0, 0, expected),
+                       "source-build suffix alone should not pass");
+    failures += expect(hkcf::security::isAllowedFallbackProcess(sourceBuild, 42, 0, 0, sourceBuild),
+                       "explicitly configured source build should pass");
 
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect")), "KDE Connect base app id should be allowed");
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.kde.kdeconnect.daemon")), "KDE Connect daemon app id should be allowed");

@@ -1,8 +1,8 @@
 # hypr-kdeconnect-fix
 
 A small user-level `xdg-desktop-portal` RemoteDesktop backend that makes KDE
-Connect remote input work on Wayland compositors that expose virtual input
-protocols.
+Connect and Deskflow remote input work on Wayland compositors that expose
+virtual input protocols.
 
 KDE Connect already uses `org.freedesktop.portal.RemoteDesktop` for remote
 mouse and keyboard input on Wayland. Some compositor-specific portal backends
@@ -15,9 +15,6 @@ This is a compatibility shim, not a compositor plugin. It was written for
 Hyprland, but the core requirement is protocol support; it can also work on
 wlroots or protocol-compatible compositors such as sway, river, Wayfire, labwc,
 phosh, and niri when their portal routing is configured.
-
-> [!WARNING]
-> This software is 99% vibe coded with OpenAI CodeX, but have been manual audited, warn in case you mind it.
 
 ## Status
 
@@ -41,6 +38,10 @@ KDE Connect 26.04+ prefers `ConnectToEIS` on Wayland. This bridge accepts that
 path and translates incoming libei pointer, scroll, and keyboard events into the
 same virtual-input backend used by the RemoteDesktop `Notify*` methods.
 
+Deskflow can use this backend to receive keyboard and pointer input on
+Hyprland, including Omarchy installations whose existing portal backend does
+not expose RemoteDesktop. See [Deskflow setup](docs/deskflow.md).
+
 ## Dependencies
 
 Build-time:
@@ -52,7 +53,8 @@ Build-time:
 - `wayland-client` 1.20+
 - `wayland-scanner`
 - `xkbcommon` 1.5+
-- `libeis` 1.4+
+- `libeis` 1.6+
+- `libei` 1.6+ when building tests (the default)
 
 Runtime:
 
@@ -60,7 +62,7 @@ Runtime:
 - a Wayland compositor exposing `zwp_virtual_keyboard_manager_v1`
 - `xdg-desktop-portal`
 - `libeis`
-- KDE Connect
+- KDE Connect or Deskflow
 
 On Arch-like systems the useful package set is roughly:
 
@@ -220,9 +222,13 @@ prompt on top of that, so it narrows the D-Bus attack surface instead:
 - RemoteDesktop and Session methods are accepted only from the current
   `org.freedesktop.portal.Desktop` owner.
 - Sessions are bound to that D-Bus sender and capped in number.
-- Accepted app ids are exact KDE Connect desktop ids; substring spoofing is
-  rejected. Empty and `surface-transient` ids are accepted only when the
-  session's D-Bus caller is verified as the system KDE Connect daemon process.
+- Accepted app ids are exact KDE Connect desktop ids and
+  `org.deskflow.deskflow`; substring matches are rejected. Native clients with
+  an empty or `surface-transient` app id must pass additional process checks.
+  KDE Connect must own its D-Bus name and use a known daemon path. Deskflow's
+  originating D-Bus process must match `/usr/bin/deskflow-core` or the exact
+  absolute path set by `HKCF_DESKFLOW_EXECUTABLE` at build time; a matching
+  basename or build-directory suffix is insufficient.
 - Notify calls are checked against the selected device mask and bounded before
   being forwarded to Wayland.
 

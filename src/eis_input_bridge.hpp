@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QSet>
 #include <QString>
 
 struct eis;
@@ -44,6 +45,7 @@ class EisInputBridge : public QObject {
     void handleSeatBind(eis_event* event);
     void handleDeviceClosed(eis_device* device);
     void handleInputEvent(eis_event* event);
+    void releaseInput(eis_device* device);
     eis_device* addKeyboard(eis_seat* seat);
     eis_device* addPointer(eis_seat* seat);
     eis_device* addAbsolutePointer(eis_seat* seat);
@@ -54,6 +56,9 @@ class EisInputBridge : public QObject {
     eis* m_eis = nullptr;
     QObject* m_notifier = nullptr;
     QHash<eis_seat*, SeatState*> m_seats;
+    QHash<eis_device*, QPair<int, int>> m_scrollRemainders;
+    QHash<eis_device*, QSet<std::uint32_t>> m_pressedKeys;
+    QHash<eis_device*, QSet<std::uint32_t>> m_pressedButtons;
 };
 
 } // namespace hkcf
