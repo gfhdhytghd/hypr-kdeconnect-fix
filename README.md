@@ -270,6 +270,25 @@ busctl --user status org.freedesktop.impl.portal.desktop.hypr_kdeconnect
 journalctl --user _COMM=hypr-kdeconnect --since '10 min ago' --no-pager
 ```
 
+Restart KDE Connect whenever `xdg-desktop-portal` or this backend was
+(re)started after `kdeconnectd`. KDE Connect keeps its old RemoteDesktop session
+handle and never recreates it, so remote input silently stops and
+`xdg-desktop-portal` logs `g_hash_table_lookup: assertion 'hash_table != NULL'
+failed` for every movement:
+
+```sh
+kquitapp6 kdeconnectd || pkill -x kdeconnectd
+kdeconnectd >/dev/null 2>&1 & disown   # or reopen KDE Connect / log in again
+```
+
+Then reopen Remote Input on the phone and move your finger once to create a
+new session. If it still fails, collect both sides:
+
+```sh
+journalctl --user _COMM=hypr-kdeconnect --since '10 min ago' --no-pager
+QT_LOGGING_RULES='kdeconnect.plugin.mousepad.debug=true' kdeconnectd
+```
+
 If the RemoteDesktop interface is missing from the public frontend, check:
 
 ```sh
