@@ -206,6 +206,7 @@ if(BUILD_TESTING)
   foreach(PROTOCOL_NAME virtual-keyboard-unstable-v1 wlr-virtual-pointer-unstable-v1)
     set(SERVER_HEADER ${CMAKE_CURRENT_BINARY_DIR}/protocols/${PROTOCOL_NAME}-server-protocol.h)
     add_custom_command(OUTPUT ${SERVER_HEADER}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/protocols
       COMMAND ${WAYLAND_SCANNER_EXECUTABLE} server-header
         ${CMAKE_CURRENT_SOURCE_DIR}/protocols/${PROTOCOL_NAME}.xml ${SERVER_HEADER}
       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/protocols/${PROTOCOL_NAME}.xml
