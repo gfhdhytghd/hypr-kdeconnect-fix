@@ -26,6 +26,20 @@ int expect(bool condition, const char* message) {
     return 1;
 }
 
+std::array<std::uint32_t, 6> components(xkb_state* state) {
+    return {xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
+            xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED),
+            xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED),
+            xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_DEPRESSED),
+            xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_LATCHED),
+            xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_LOCKED)};
+}
+
+void apply(xkb_state* state, hkcf::XkbStateHistory& history, std::uint32_t code, xkb_key_direction direction) {
+    xkb_state_update_key(state, code + 8, direction);
+    history.record(code, direction);
+}
+
 } // namespace
 
 int main() {
@@ -117,52 +131,77 @@ int main() {
     if (compiled) xkb_keymap_unref(compiled);
     xkb_context_unref(context);
     auto* oldState = resolver.createState({KEY_LEFTSHIFT, KEY_RIGHTSHIFT});
-    xkb_state_update_key(oldState, KEY_CAPSLOCK + 8, XKB_KEY_DOWN);
-    xkb_state_update_key(oldState, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+    hkcf::XkbStateHistory shiftHistory;
+    shiftHistory.reset({KEY_LEFTSHIFT, KEY_RIGHTSHIFT});
+    apply(oldState, shiftHistory, KEY_CAPSLOCK, XKB_KEY_DOWN);
+    apply(oldState, shiftHistory, KEY_CAPSLOCK, XKB_KEY_UP);
     const auto oldLocks = xkb_state_serialize_mods(oldState, XKB_STATE_MODS_LOCKED);
-    failures += expect(resolver.resolveOrExtend(XKB_KEY_eogonek, {KEY_LEFTSHIFT, KEY_RIGHTSHIFT}).has_value(),
+    failures += expect(resolver.resolveOrExtend(XKB_KEY_eogonek, {KEY_LEFTSHIFT, KEY_RIGHTSHIFT}, oldState, &shiftHistory).has_value(),
                        "extend while momentary modifiers are held");
     auto* newState = resolver.createState({KEY_LEFTSHIFT, KEY_RIGHTSHIFT}, oldState);
     failures += expect(xkb_state_serialize_mods(newState, XKB_STATE_MODS_DEPRESSED) != 0 &&
                        xkb_state_serialize_mods(newState, XKB_STATE_MODS_LOCKED) == oldLocks,
                        "replacement preserves held modifiers and Caps Lock");
+    failures += expect(components(oldState) == components(newState), "held Shift replacement equals the real current state");
+    xkb_state_update_key(oldState, KEY_LEFTSHIFT + 8, XKB_KEY_UP);
     xkb_state_update_key(newState, KEY_LEFTSHIFT + 8, XKB_KEY_UP);
+    failures += expect(components(oldState) == components(newState), "first Shift release matches the original");
     failures += expect(xkb_state_serialize_mods(newState, XKB_STATE_MODS_DEPRESSED) != 0, "replacement keeps both Shift reference counts");
+    xkb_state_update_key(oldState, KEY_RIGHTSHIFT + 8, XKB_KEY_UP);
     xkb_state_update_key(newState, KEY_RIGHTSHIFT + 8, XKB_KEY_UP);
+    failures += expect(components(oldState) == components(newState), "last Shift release matches the original");
     failures += expect(xkb_state_serialize_mods(newState, XKB_STATE_MODS_DEPRESSED) == 0, "replacement permits balanced modifier releases");
     xkb_state_unref(oldState);
     xkb_state_unref(newState);
 
+    {
+        hkcf::KeyResolver shift(names);
+        hkcf::XkbStateHistory history;
+        auto* current = shift.createState({}, nullptr, &history);
+        apply(current, history, KEY_LEFTSHIFT, XKB_KEY_DOWN);
+        failures += expect(shift.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_LEFTSHIFT}, current, &history).has_value(),
+                           "held plain Shift allows replacement");
+        auto* rebuilt = shift.createState(history.heldKeys(), current);
+        failures += expect(components(current) == components(rebuilt), "plain Shift rebuild equals original");
+        xkb_state_update_key(current, KEY_LEFTSHIFT + 8, XKB_KEY_UP);
+        xkb_state_update_key(rebuilt, KEY_LEFTSHIFT + 8, XKB_KEY_UP);
+        failures += expect(components(current) == components(rebuilt), "plain Shift release equals original");
+        xkb_state_unref(current);
+        xkb_state_unref(rebuilt);
+    }
+
     std::int64_t capsNow = 0;
     hkcf::KeyResolver caps(names, [&] { return capsNow; });
     auto* capsState = caps.createState({});
-    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_DOWN);
-    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+    hkcf::XkbStateHistory capsHistory;
+    capsHistory.reset({});
+    apply(capsState, capsHistory, KEY_CAPSLOCK, XKB_KEY_DOWN);
+    apply(capsState, capsHistory, KEY_CAPSLOCK, XKB_KEY_UP);
     failures += expect(xkb_state_mod_name_is_active(capsState, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
                        "Caps Lock starts on");
-    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_DOWN);
+    apply(capsState, capsHistory, KEY_CAPSLOCK, XKB_KEY_DOWN);
     const auto capsRevision = caps.revision();
     const auto heldHandler = qInstallMessageHandler(countBudgetWarnings);
     for (int i = 0; i < 65; ++i)
-        failures += expect(!caps.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_CAPSLOCK}),
+        failures += expect(!caps.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_CAPSLOCK}, capsState, &capsHistory),
                            "held Caps Lock refuses extension");
     failures += expect(caps.revision() == capsRevision && caps.keymap() == xkb_state_get_keymap(capsState) &&
                        !caps.resolveKeysym(XKB_KEY_Greek_alpha), "refusal leaves keymap and revision unchanged");
-    failures += expect(caps.resolveOrExtend(XKB_KEY_a, {KEY_CAPSLOCK}).has_value(),
+    failures += expect(caps.resolveOrExtend(XKB_KEY_a, {KEY_CAPSLOCK}, capsState, &capsHistory).has_value(),
                        "mapped symbols still resolve while Caps Lock is held");
     failures += expect(heldWarnings == 1, "held-key warnings are rate limited");
     capsNow += hkcf::security::kKeymapWarningIntervalMs;
     for (int i = 0; i < 65; ++i)
-        failures += expect(!caps.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_CAPSLOCK}),
+        failures += expect(!caps.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_CAPSLOCK}, capsState, &capsHistory),
                            "held Caps Lock still refuses extension after warning interval");
     failures += expect(heldWarnings == 2, "held-key warning resumes after its interval");
-    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+    apply(capsState, capsHistory, KEY_CAPSLOCK, XKB_KEY_UP);
     failures += expect(!xkb_state_mod_name_is_active(capsState, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
                        "original Caps Lock release turns it off after refused extension");
     // Keep time fixed: refused attempts must leave the entire burst available.
-    failures += expect(caps.resolveOrExtend(XKB_KEY_Greek_alpha).has_value(), "released Caps Lock permits the refused symbol");
+    failures += expect(caps.resolveOrExtend(XKB_KEY_Greek_alpha, {}, capsState, &capsHistory).has_value(), "released Caps Lock permits the refused symbol");
     for (int i = 1; i < hkcf::security::kKeymapReplacementBurst; ++i)
-        failures += expect(caps.resolveOrExtend(xkb_utf32_to_keysym(0x4e00 + i)).has_value(),
+        failures += expect(caps.resolveOrExtend(xkb_utf32_to_keysym(0x4e00 + i), {}, capsState, &capsHistory).has_value(),
                            "release permits extension with the full replacement budget");
     auto* capsAfter = caps.createState({}, capsState);
     failures += expect(!xkb_state_mod_name_is_active(capsAfter, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
@@ -170,6 +209,116 @@ int main() {
     qInstallMessageHandler(heldHandler);
     xkb_state_unref(capsState);
     xkb_state_unref(capsAfter);
+
+    for (bool shiftedCaps : {true, false}) {
+        auto actionNames = names;
+        actionNames.layout = shiftedCaps ? "us" : "us,pl";
+        actionNames.options = shiftedCaps ? "caps:escape_shifted_capslock" : "grp:alt_shift_toggle";
+        std::int64_t actionNow = 0;
+        hkcf::KeyResolver actions(actionNames, [&] { return actionNow; });
+        auto* current = actions.createState({});
+        hkcf::XkbStateHistory history;
+        history.reset({});
+        if (shiftedCaps) {
+            apply(current, history, KEY_LEFTSHIFT, XKB_KEY_DOWN);
+            apply(current, history, KEY_CAPSLOCK, XKB_KEY_DOWN);
+            apply(current, history, KEY_CAPSLOCK, XKB_KEY_UP);
+            apply(current, history, KEY_CAPSLOCK, XKB_KEY_DOWN);
+        } else {
+            // Press order matters: Alt precedes Shift although its evdev code is larger.
+            apply(current, history, KEY_LEFTALT, XKB_KEY_DOWN);
+            apply(current, history, KEY_LEFTSHIFT, XKB_KEY_DOWN);
+        }
+        auto* replay = history.replay(xkb_state_get_keymap(current));
+        auto* rebuilt = actions.createState(history.heldKeys(), current);
+        failures += expect(replay && components(replay) == components(current), "history reproduces current components");
+        if (shiftedCaps) {
+            failures += expect(components(current) == components(rebuilt), "shifted Caps mismatch only appears on release");
+            xkb_state_update_key(rebuilt, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+            xkb_state_update_key(replay, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+            failures += expect(components(replay) != components(rebuilt), "shifted Caps release exposes hidden lock action");
+        } else {
+            auto* sorted = actions.createState({KEY_LEFTSHIFT, KEY_LEFTALT}, current);
+            failures += expect(components(current) != components(sorted), "old sorted Alt-Shift replay changes depressed modifiers");
+            failures += expect(components(current) == components(rebuilt), "actual Alt-Shift press order preserves all components");
+            xkb_state_unref(sorted);
+        }
+        const auto heldKeys = history.heldKeys();
+        const std::set<std::uint32_t> heldSet(heldKeys.begin(), heldKeys.end());
+        const auto before = components(current);
+        if (shiftedCaps) {
+            for (int i = 0; i < 3; ++i)
+                failures += expect(!actions.resolveOrExtend(XKB_KEY_Greek_alpha, heldSet, current, &history),
+                                   "modifier-selected Caps action refuses replacement");
+            failures += expect(actions.revision() == 0 && actions.keymap() == xkb_state_get_keymap(current) &&
+                               components(current) == before, "refusal leaves the real state and map untouched");
+        } else {
+            failures += expect(actions.resolveOrExtend(XKB_KEY_Greek_alpha, heldSet, current, &history).has_value(),
+                               "equivalent Alt-Shift replay permits replacement");
+            xkb_state_unref(rebuilt);
+            rebuilt = actions.createState(heldKeys, current);
+        }
+        xkb_state_unref(replay);
+        replay = history.replay(xkb_state_get_keymap(current));
+        const std::vector<std::uint32_t> releases = shiftedCaps ? std::vector<std::uint32_t>{KEY_CAPSLOCK, KEY_LEFTSHIFT}
+                                                               : std::vector<std::uint32_t>{KEY_LEFTSHIFT, KEY_LEFTALT};
+        for (auto code : releases) {
+            apply(current, history, code, XKB_KEY_UP);
+            xkb_state_update_key(replay, code + 8, XKB_KEY_UP);
+            failures += expect(components(replay) == components(current), "exact history retains release-time action filters");
+            if (!shiftedCaps) {
+                xkb_state_update_key(rebuilt, code + 8, XKB_KEY_UP);
+                failures += expect(components(rebuilt) == components(current), "Alt-Shift replacement releases match original");
+            }
+        }
+        if (shiftedCaps)
+            failures += expect(xkb_state_serialize_mods(current, XKB_STATE_MODS_LOCKED) == 0,
+                               "shifted Caps release leaves the original lock off");
+        for (int i = shiftedCaps ? 0 : 1; i < hkcf::security::kKeymapReplacementBurst; ++i)
+            failures += expect(actions.resolveOrExtend(xkb_utf32_to_keysym(0x4e00 + i), {}, current, &history).has_value(),
+                               "unsafe replacements consume no burst budget");
+        xkb_state_unref(current);
+        xkb_state_unref(replay);
+        xkb_state_unref(rebuilt);
+    }
+
+    {
+        hkcf::KeyResolver replayResolver(names);
+        auto* current = replayResolver.createState({});
+        hkcf::XkbStateHistory history;
+        history.reset({});
+        apply(current, history, KEY_CAPSLOCK, XKB_KEY_DOWN);
+        apply(current, history, KEY_CAPSLOCK, XKB_KEY_UP);
+        apply(current, history, KEY_LEFTSHIFT, XKB_KEY_DOWN);
+        const auto uploadHeld = history.heldKeys();
+        auto* uploaded = replayResolver.createState(uploadHeld, current, &history);
+        xkb_state_unref(current);
+        current = uploaded;
+        apply(current, history, KEY_LEFTSHIFT, XKB_KEY_UP);
+        auto* replay = history.replay(replayResolver.keymap());
+        failures += expect(replay && components(replay) == components(current), "upload replay includes the exact mask operation");
+        apply(current, history, KEY_CAPSLOCK, XKB_KEY_DOWN);
+        xkb_state_update_key(replay, KEY_CAPSLOCK + 8, XKB_KEY_DOWN);
+        apply(current, history, KEY_CAPSLOCK, XKB_KEY_UP);
+        xkb_state_update_key(replay, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+        failures += expect(components(replay) == components(current), "post-upload replay retains lock release behavior");
+        xkb_state_unref(replay);
+        for (std::size_t i = 0; i <= hkcf::XkbStateHistory::kMaxEvents; ++i)
+            apply(current, history, KEY_A, i % 2 ? XKB_KEY_UP : XKB_KEY_DOWN);
+        const auto heldKeys = history.heldKeys();
+        const std::set<std::uint32_t> heldSet(heldKeys.begin(), heldKeys.end());
+        failures += expect(!history.replay(replayResolver.keymap()), "bounded history refuses an incomplete replay");
+        failures += expect(!replayResolver.resolveOrExtend(XKB_KEY_Greek_alpha, heldSet, current, &history),
+                           "history overflow blocks replacement");
+        failures += expect(!replayResolver.resolveOrExtend(XKB_KEY_Greek_alpha, heldSet, current),
+                           "current state without history blocks replacement");
+        uploaded = replayResolver.createState(heldKeys, current, &history);
+        xkb_state_unref(current);
+        current = uploaded;
+        failures += expect(replayResolver.resolveOrExtend(XKB_KEY_Greek_alpha, heldSet, current, &history).has_value(),
+                           "upload resets bounded history and permits equivalent replacement");
+        xkb_state_unref(current);
+    }
 
     std::set<std::uint32_t> pinned;
     if (dynamic) pinned.insert(dynamic->evdevKeycode);
@@ -196,8 +345,10 @@ int main() {
     auto* beforeGroup = groups.createState({KEY_COMPOSE});
     failures += expect(xkb_state_serialize_layout(beforeGroup, XKB_STATE_LAYOUT_DEPRESSED) == 1,
                        "Menu temporarily selects the second group");
-    failures += expect(!groups.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_COMPOSE}),
-                       "held layout action is not a plain SetMods/NoAction hold");
+    hkcf::XkbStateHistory groupHistory;
+    groupHistory.reset({KEY_COMPOSE});
+    failures += expect(groups.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_COMPOSE}, beforeGroup, &groupHistory).has_value(),
+                       "equivalent momentary group action permits replacement");
     xkb_state_update_key(beforeGroup, KEY_COMPOSE + 8, XKB_KEY_UP);
     failures += expect(groups.resolveOrExtend(XKB_KEY_Greek_alpha).has_value(), "extend after Menu release");
     auto* afterGroup = groups.createState({}, beforeGroup);

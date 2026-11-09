@@ -40,7 +40,7 @@ class WaylandInput {
     [[nodiscard]] bool isKeycodePressed(std::uint32_t keycode) const { return m_pressedKeycodes.contains(keycode); }
     [[nodiscard]] QRect logicalBounds() const;
     [[nodiscard]] std::optional<ResolvedKey> resolveKeysym(std::uint32_t keysym) {
-        return m_keyResolver.resolveOrExtend(keysym, m_pressedKeycodes);
+        return m_keyResolver.resolveOrExtend(keysym, m_pressedKeycodes, m_xkbState, &m_xkbHistory);
     }
 
     static void handleGlobal(void* data, wl_registry* registry, std::uint32_t name, const char* interface, std::uint32_t version);
@@ -100,6 +100,7 @@ class WaylandInput {
     std::set<std::uint32_t> m_pressedKeycodes;
     std::uint64_t m_uploadedRevision = ~std::uint64_t{0};
     xkb_state* m_xkbState = nullptr;
+    XkbStateHistory m_xkbHistory;
     std::uint32_t m_lastDepressed = ~0u;
     std::uint32_t m_lastLatched = ~0u;
     std::uint32_t m_lastLocked = ~0u;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -11,6 +12,26 @@
 #include <xkbcommon/xkbcommon.h>
 
 namespace hkcf {
+
+// Exact replay of operations applied to a state, including the upload's mask
+// operation after held-key replay. Overflow fails closed until the next upload.
+class XkbStateHistory {
+  public:
+    static constexpr std::size_t kMaxEvents = 4096;
+    void reset(const std::vector<std::uint32_t>& held,
+               std::optional<std::array<std::uint32_t, 6>> uploadMask = std::nullopt);
+    void record(std::uint32_t code, xkb_key_direction direction);
+    // Caller owns the replay; keymap must be the uploaded state's keymap.
+    [[nodiscard]] xkb_state* replay(xkb_keymap* keymap) const;
+    [[nodiscard]] const std::vector<std::uint32_t>& heldKeys() const { return m_held; }
+
+  private:
+    struct Event { std::uint32_t code; xkb_key_direction direction; };
+    std::vector<std::uint32_t> m_initialHeld, m_held;
+    std::optional<std::array<std::uint32_t, 6>> m_uploadMask;
+    std::vector<Event> m_events;
+    bool m_complete = false;
+};
 
 struct ResolvedKey {
     std::uint32_t evdevKeycode = 0;
@@ -32,18 +53,20 @@ class KeyResolver {
     [[nodiscard]] bool valid() const;
     [[nodiscard]] std::optional<ResolvedKey> resolveKeysym(xkb_keysym_t keysym) const;
     // Held evdev codes cannot be reassigned, including holds from raw input.
-    [[nodiscard]] std::optional<ResolvedKey> resolveOrExtend(xkb_keysym_t keysym, const std::set<std::uint32_t>& held = {});
+    [[nodiscard]] std::optional<ResolvedKey> resolveOrExtend(xkb_keysym_t keysym, const std::set<std::uint32_t>& held = {},
+                                                       xkb_state* current = nullptr, const XkbStateHistory* history = nullptr);
     [[nodiscard]] xkb_keymap* keymap() const { return m_keymap.get(); }
     [[nodiscard]] std::string keymapText() const;
     // Caller owns the returned state. No display connection is needed.
-    [[nodiscard]] xkb_state* createState(const std::set<std::uint32_t>& held, xkb_state* previous = nullptr) const;
+    [[nodiscard]] xkb_state* createState(const std::vector<std::uint32_t>& held, xkb_state* previous = nullptr,
+                                         XkbStateHistory* history = nullptr) const;
     [[nodiscard]] std::uint64_t revision() const { return m_revision; }
     static constexpr std::size_t kMaxExtraKeysyms = 64;
 
   private:
     static std::int64_t monotonicTimeMs();
     explicit KeyResolver(const xkb_rule_names* names, Clock clock);
-    bool takeReplacementToken();
+    bool takeReplacementToken(bool consume = true);
     struct XkbContextDeleter {
         void operator()(xkb_context* context) const;
     };

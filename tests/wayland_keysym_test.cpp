@@ -333,6 +333,30 @@ int main(int argc, char **argv) {
                 "owned keysym repeat event ordering");
       }
     }
+    {
+      // More key events than the replay log holds must not block later
+      // replacements: the log compacts whenever no key is held.
+      for (std::size_t i = 0; i <= hkcf::XkbStateHistory::kMaxEvents / 2 + 8; ++i) {
+        check(input.keyboardKeycode(KEY_A, true), "long session press");
+        check(input.keyboardKeycode(KEY_A, false), "long session release");
+        if (i % 64 == 0)
+          sync();
+      }
+      sync();
+      int maps;
+      {
+        std::lock_guard lock(capture.mutex);
+        maps = capture.maps;
+      }
+      check(input.keyboardKeysym(XKB_KEY_Cyrillic_zhe, true), "replacement after a long session");
+      check(input.keyboardKeysym(XKB_KEY_Cyrillic_zhe, false), "release after a long session");
+      sync();
+      {
+        std::lock_guard lock(capture.mutex);
+        check(capture.maps == maps + 1 && !capture.mapError, "long session still uploads a replacement keymap");
+      }
+      released();
+    }
     for (uint32_t modifier : {KEY_LEFTSHIFT, KEY_LEFTCTRL, KEY_LEFTALT}) {
       hkcf::InputState state(input);
       int owner;

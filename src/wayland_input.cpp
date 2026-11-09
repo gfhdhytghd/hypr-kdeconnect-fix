@@ -202,7 +202,10 @@ bool WaylandInput::sendKeyboardKeymap() {
         return false;
     }
     // Rebuild per-key counts, and preserve locks/latches across replacement.
-    auto* state = m_keyResolver.createState(m_pressedKeycodes, m_xkbState);
+    const auto held = m_xkbState ? m_xkbHistory.heldKeys()
+                                 : std::vector<std::uint32_t>(m_pressedKeycodes.begin(), m_pressedKeycodes.end());
+    XkbStateHistory history;
+    auto* state = m_keyResolver.createState(held, m_xkbState, &history);
     if (!state)
         return false;
     const std::size_t size = keymapText.size() + 1;
@@ -228,6 +231,7 @@ bool WaylandInput::sendKeyboardKeymap() {
     }
 
     zwp_virtual_keyboard_v1_keymap(m_keyboard, kKeyboardKeymapFormatXkbV1, *fd, static_cast<std::uint32_t>(size));
+    m_xkbHistory = std::move(history);
     if (m_xkbState)
         xkb_state_unref(m_xkbState);
     m_xkbState = state;
@@ -372,12 +376,23 @@ void WaylandInput::updateModifiers(std::uint32_t keycode, bool pressed) {
     if (!m_keyboard || !m_xkbState)
         return;
 
-    xkb_state_update_key(m_xkbState, static_cast<xkb_keycode_t>(keycode + 8), pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+    const auto direction = pressed ? XKB_KEY_DOWN : XKB_KEY_UP;
+    xkb_state_update_key(m_xkbState, static_cast<xkb_keycode_t>(keycode + 8), direction);
+    m_xkbHistory.record(keycode, direction);
 
     const std::uint32_t depressed = xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_DEPRESSED);
     const std::uint32_t latched = xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LATCHED);
     const std::uint32_t locked = xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LOCKED);
     const std::uint32_t group = xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_EFFECTIVE);
+
+    // With no held key and no latch, no action filter is pending: a mask
+    // snapshot reproduces the state exactly. Compacting here keeps the replay
+    // log short so it never overflows and blocks later keymap replacements.
+    if (m_xkbHistory.heldKeys().empty() && latched == 0 && xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_LATCHED) == 0) {
+        m_xkbHistory.reset({}, std::array<std::uint32_t, 6>{depressed, latched, locked,
+                                                            xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_DEPRESSED), 0,
+                                                            xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_LOCKED)});
+    }
 
     if (depressed == m_lastDepressed && latched == m_lastLatched && locked == m_lastLocked && group == m_lastGroup)
         return;
