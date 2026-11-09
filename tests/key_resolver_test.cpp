@@ -270,5 +270,32 @@ int main() {
     failures += expect(!charged.resolveOrExtend(XKB_KEY_Greek_alpha), "rollback does not refund compile tokens");
     qInstallMessageHandler(previousHandler);
 
+    {
+        // lv(apostrophe) puts ISO_Level3_Latch on the apostrophe key. A latch
+        // key must never be used as a modifier, nor the target as its own modifier.
+        const xkb_rule_names latvian{.rules = "evdev", .model = "pc105", .layout = "lv", .variant = "apostrophe", .options = ""};
+        hkcf::KeyResolver resolver(latvian);
+        failures += expect(resolver.valid(), "lv(apostrophe) keymap compiles");
+        const auto key = resolver.resolveKeysym(XKB_KEY_apostrophe);
+        if (key) {
+            bool selfModifier = false;
+            for (const auto code : key->modifierKeycodes)
+                selfModifier |= code == key->evdevKeycode;
+            failures += expect(!selfModifier, "target key is never its own modifier");
+            xkb_state* state = xkb_state_new(resolver.keymap());
+            for (const auto code : key->modifierKeycodes)
+                xkb_state_update_key(state, code + 8, XKB_KEY_DOWN);
+            failures += expect(xkb_state_key_get_one_sym(state, key->evdevKeycode + 8) == XKB_KEY_apostrophe,
+                               "resolved keys produce the apostrophe");
+            xkb_state_update_key(state, key->evdevKeycode + 8, XKB_KEY_DOWN);
+            xkb_state_update_key(state, key->evdevKeycode + 8, XKB_KEY_UP);
+            for (auto it = key->modifierKeycodes.rbegin(); it != key->modifierKeycodes.rend(); ++it)
+                xkb_state_update_key(state, *it + 8, XKB_KEY_UP);
+            failures += expect(xkb_state_serialize_mods(state, XKB_STATE_MODS_EFFECTIVE) == 0,
+                               "typing the apostrophe leaves no latched or held modifier");
+            xkb_state_unref(state);
+        }
+    }
+
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

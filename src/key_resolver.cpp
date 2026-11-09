@@ -123,6 +123,12 @@ std::optional<ResolvedKey> KeyResolver::resolveWithMask(xkb_keysym_t keysym, xkb
              xkb_state_serialize_mods(probe.get(), XKB_STATE_MODS_LOCKED)) ||
             xkb_state_serialize_layout(probe.get(), XKB_STATE_LAYOUT_EFFECTIVE) != 0)
             continue;
+        // LatchMods looks like SetMods while pressed; only keys that leave no
+        // state behind after release are plain momentary modifiers.
+        xkb_state_update_key(probe.get(), code, XKB_KEY_UP);
+        if (xkb_state_serialize_mods(probe.get(), XKB_STATE_MODS_EFFECTIVE) ||
+            xkb_state_serialize_layout(probe.get(), XKB_STATE_LAYOUT_EFFECTIVE) != 0)
+            continue;
         result.modifierKeycodes.push_back(code - 8);
         remaining &= ~mods;
         xkb_state_update_key(state.get(), code, XKB_KEY_DOWN);
@@ -131,6 +137,8 @@ std::optional<ResolvedKey> KeyResolver::resolveWithMask(xkb_keysym_t keysym, xkb
         return std::nullopt;
     for (auto code = std::max(9u, xkb_keymap_min_keycode(m_keymap.get()));
          code <= std::min(KEY_MAX + 8u, xkb_keymap_max_keycode(m_keymap.get())); ++code) {
+        if (std::find(result.modifierKeycodes.begin(), result.modifierKeycodes.end(), code - 8) != result.modifierKeycodes.end())
+            continue;
         if (xkb_state_key_get_one_sym(state.get(), code) == keysym) {
             result.evdevKeycode = code - 8;
             return result;

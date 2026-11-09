@@ -232,12 +232,11 @@ bool WaylandInput::sendKeyboardKeymap() {
     const auto locked = xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED);
     const auto group = xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE);
     zwp_virtual_keyboard_v1_modifiers(m_keyboard, depressed, latched, locked, group);
-    ok = flush();
+    // The requests are queued (libwayland duplicated the fd), so the compositor
+    // will receive this keymap even if flush() reports backpressure now. Adopt
+    // it unconditionally: rolling back here would desynchronize the slot map.
+    flush();
     close(*fd);
-    if (!ok) {
-        xkb_state_unref(state);
-        return false;
-    }
     if (m_xkbState)
         xkb_state_unref(m_xkbState);
     m_xkbState = state;
