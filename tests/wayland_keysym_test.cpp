@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QThread>
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <iostream>
 #include <linux/input-event-codes.h>
@@ -33,6 +34,15 @@ struct Capture {
   std::atomic<int> frames = 0;
 };
 Capture capture;
+bool failKeymapWrite = false;
+extern "C" int __real_ftruncate(int, off_t);
+extern "C" int __wrap_ftruncate(int fd, off_t size) {
+  if (failKeymapWrite) {
+    errno = ENOSPC;
+    return -1;
+  }
+  return __real_ftruncate(fd, size);
+}
 void destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 void keyboardMap(wl_client *, wl_resource *, uint32_t, int32_t fd, uint32_t size) {
   std::string text(size, '\0');
@@ -227,6 +237,54 @@ int main(int argc, char **argv) {
         std::lock_guard lock(capture.mutex);
         check(capture.maps == maps, "mapped Unicode repeat and release do not upload");
       }
+    }
+    {
+      hkcf::InputState state(input);
+      int owner, otherOwner;
+      check(state.keyboardKeycode(&owner, KEY_LEFTSHIFT, true), "Shift before failed map upload");
+      check(input.resolveKeysym(XKB_KEY_Cyrillic_ya).has_value(), "pending keymap revision");
+      sync();
+      int maps;
+      std::size_t before;
+      {
+        std::lock_guard lock(capture.mutex);
+        maps = capture.maps;
+        before = capture.keys.size();
+      }
+      failKeymapWrite = true;
+      check(!state.keyboardKeycode(&owner, KEY_B, true), "pending map failure rejects press");
+      check(!state.keyboardKeysym(&owner, XKB_KEY_Aogonek, true), "pending map failure rejects symbol press");
+      check(!input.keyboardKeysym('Z', true), "pending map failure rejects direct symbol press");
+      check(state.keyboardKeycode(&owner, KEY_LEFTSHIFT, false), "failed map upload must allow Shift release");
+      released();
+      {
+        std::lock_guard lock(capture.mutex);
+        check(capture.maps == maps && capture.keys.size() == before + 1 &&
+              capture.keys.back().code == KEY_LEFTSHIFT && capture.keys.back().state == 0,
+              "failed upload sends only the held key release using the old map");
+      }
+      // Leave the failed owner's logical lifetime active during these retries.
+      failKeymapWrite = false;
+      check(state.keyboardKeycode(&otherOwner, KEY_B, true), "another owner retries failed press");
+      check(input.keyboardKeysym('Z', true), "retry direct symbol with Shift");
+      sync();
+      {
+        std::lock_guard lock(capture.mutex);
+        check(capture.maps == maps + 1, "release retained the pending revision for retry");
+        check(capture.keys[before + 1].code == KEY_B && capture.keys[before + 1].state == 1,
+              "failed press did not leave a phantom owner suppressing the next press");
+        check(capture.symbols.back() == XKB_KEY_Z, "direct failed symbol retry restores Shift");
+      }
+      check(input.keyboardKeysym('Z', false), "release retried direct symbol");
+      check(state.keyboardKeysym(&owner, XKB_KEY_Aogonek, true), "retry failed symbol with all modifiers");
+      sync();
+      {
+        std::lock_guard lock(capture.mutex);
+        check(capture.symbols.back() == XKB_KEY_Aogonek, "failed symbol retry restores both modifiers");
+      }
+      state.releaseOwner(&owner);
+      state.releaseOwner(&otherOwner);
+      released();
     }
     for (bool releaseRawFirst : {false, true}) {
       hkcf::InputState state(input);

@@ -231,13 +231,14 @@ bool WaylandInput::sendKeyboardKeymap() {
     if (m_xkbState)
         xkb_state_unref(m_xkbState);
     m_xkbState = state;
-    m_uploadedRevision = m_keyResolver.revision();
     m_lastDepressed = xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED);
     m_lastLatched = xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED);
     m_lastLocked = xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED);
     m_lastGroup = xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE);
     zwp_virtual_keyboard_v1_modifiers(m_keyboard, m_lastDepressed, m_lastLatched, m_lastLocked, m_lastGroup);
     ok = flush();
+    if (ok)
+        m_uploadedRevision = m_keyResolver.revision();
     close(*fd);
     return ok;
 }
@@ -347,7 +348,9 @@ bool WaylandInput::keyboardKeycode(std::uint32_t keycode, bool pressed, bool rep
     if (!ensureReady())
         return false;
 
-    if (m_uploadedRevision != m_keyResolver.revision() && !sendKeyboardKeymap())
+    // Held keycodes are pinned across replacements. Release them using the old
+    // map if uploading the pending revision fails; retry that revision later.
+    if (m_uploadedRevision != m_keyResolver.revision() && !sendKeyboardKeymap() && pressed)
         return false;
     const bool wasHeld = m_pressedKeycodes.contains(keycode);
     if (pressed)
@@ -401,6 +404,9 @@ bool WaylandInput::keyboardKeysym(std::uint32_t keysym, bool pressed) {
     if (!resolved)
         return false;
     if (pressed) {
+        // Do not create logical holds when a pending map cannot be uploaded.
+        if (!ensureReady() || (m_uploadedRevision != m_keyResolver.revision() && !sendKeyboardKeymap()))
+            return false;
         if (!repeated) {
             m_heldKeysyms.insert(keysym, *resolved);
             ++m_keysymKeyHolds[resolved->evdevKeycode];

@@ -413,16 +413,11 @@ void EisInputBridge::handleInputEvent(eis_event* event) {
         const auto decoded = security::decodeTextUtf8(eis_event_text_get_utf8(event));
         if (!decoded)
             break;
-        // A temporary hold must not release a TEXT_KEYSYM held by this device.
-        int textOwner;
         for (const auto point : decoded->toUcs4()) {
             const auto symbol = xkb_utf32_to_keysym(point);
-            if (symbol != XKB_KEY_NoSymbol) {
-                m_inputs.keyboardKeysym(&textOwner, symbol, true);
-                m_inputs.keyboardKeysym(&textOwner, symbol, false);
-            }
+            if (symbol != XKB_KEY_NoSymbol)
+                m_inputs.keyboardText(symbol);
         }
-        m_inputs.releaseOwner(&textOwner);
         break;
     }
     case EIS_EVENT_KEYBOARD_KEY:

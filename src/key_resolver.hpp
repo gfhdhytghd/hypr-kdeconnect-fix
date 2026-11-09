@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -20,8 +21,9 @@ struct ResolvedKey {
 
 class KeyResolver {
   public:
-    KeyResolver();
-    explicit KeyResolver(const xkb_rule_names& names);
+    using Clock = std::function<std::int64_t()>;
+    explicit KeyResolver(Clock clock = monotonicTimeMs);
+    explicit KeyResolver(const xkb_rule_names& names, Clock clock = monotonicTimeMs);
     ~KeyResolver();
 
     KeyResolver(const KeyResolver&) = delete;
@@ -39,7 +41,9 @@ class KeyResolver {
     static constexpr std::size_t kMaxExtraKeysyms = 64;
 
   private:
-    explicit KeyResolver(const xkb_rule_names* names);
+    static std::int64_t monotonicTimeMs();
+    explicit KeyResolver(const xkb_rule_names* names, Clock clock);
+    bool takeReplacementToken();
     struct XkbContextDeleter {
         void operator()(xkb_context* context) const;
     };
@@ -67,6 +71,10 @@ class KeyResolver {
     std::vector<Slot> m_slots;
     std::size_t m_nextSlot = 0;
     std::uint64_t m_revision = 0;
+    Clock m_clock;
+    std::int64_t m_budgetTimeMs;
+    double m_replacementTokens;
+    std::optional<std::int64_t> m_lastBudgetWarningMs;
 };
 
 } // namespace hkcf

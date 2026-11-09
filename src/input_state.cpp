@@ -49,7 +49,12 @@ bool InputState::keyboardKeycode(const void* owner, std::uint32_t code, bool pre
     const bool repeated = pressed && m_keys.value(owner).contains(code);
     if (!update(m_keys, owner, code, pressed) && !repeated)
         return true;
-    return m_input.keyboardKeycode(code, pressed, repeated);
+    const bool ok = m_input.keyboardKeycode(code, pressed, repeated);
+    // A failure before enqueueing a press must not suppress another owner's
+    // next press. Keep holds for requests that were queued before flush failed.
+    if (!ok && pressed && !repeated && !m_input.isKeycodePressed(code))
+        update(m_keys, owner, code, false);
+    return ok;
 }
 
 bool InputState::pointerButton(const void* owner, std::uint32_t code, bool pressed) {
@@ -78,15 +83,23 @@ bool InputState::keyboardKeysym(const void* owner, std::uint32_t symbol, bool pr
         m_keysyms[owner].insert(symbol, key);
     }
     if (pressed) {
-        // Record holds even if a sink reports failure: a queued Wayland request
-        // may already have been sent and still needs a release during cleanup.
+        const auto cancelPress = [&] {
+            releaseOwner(key.data());
+            auto it = m_keysyms.find(owner);
+            it->remove(symbol);
+            if (it->isEmpty())
+                m_keysyms.erase(it);
+            return false;
+        };
         if (!repeated) {
             for (const auto code : key->modifierKeycodes) {
                 if (!keyboardKeycode(key.data(), code, true))
-                    return false;
+                    return cancelPress();
             }
         }
-        return keyboardKeycode(key.data(), key->evdevKeycode, true);
+        if (!keyboardKeycode(key.data(), key->evdevKeycode, true))
+            return repeated ? false : cancelPress();
+        return true;
     }
     const bool ok = keyboardKeycode(key.data(), key->evdevKeycode, false);
     bool modifiersOk = true;
@@ -97,6 +110,22 @@ bool InputState::keyboardKeysym(const void* owner, std::uint32_t symbol, bool pr
     if (symbols->isEmpty())
         m_keysyms.erase(symbols);
     return ok && modifiersOk;
+}
+
+bool InputState::keyboardText(std::uint32_t symbol) {
+    if (!security::isAllowedKeysym(symbol))
+        return false;
+    const auto key = m_input.resolveKeysym(symbol);
+    if (!key)
+        return false;
+    const bool held = isPressed(m_keys, key->evdevKeycode);
+    int owner;
+    const bool pressed = keyboardKeysym(&owner, symbol, true);
+    // A shared hold suppresses the normal press. Emit a repeat without adding
+    // an XKB modifier hold, then retain the original owner's physical hold.
+    const bool repeated = !pressed || !held || m_input.keyboardKeycode(key->evdevKeycode, true, true);
+    const bool released = keyboardKeysym(&owner, symbol, false);
+    return pressed && repeated && released;
 }
 
 void InputState::releaseOwner(const void* owner) {

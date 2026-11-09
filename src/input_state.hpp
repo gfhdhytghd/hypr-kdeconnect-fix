@@ -21,6 +21,7 @@ class InputState {
 
     bool keyboardKeycode(const void* owner, std::uint32_t code, bool pressed);
     bool keyboardKeysym(const void* owner, std::uint32_t symbol, bool pressed);
+    bool keyboardText(std::uint32_t symbol);
     bool pointerButton(const void* owner, std::uint32_t code, bool pressed);
     void releaseOwner(const void* owner);
 

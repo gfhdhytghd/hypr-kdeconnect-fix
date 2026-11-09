@@ -37,6 +37,7 @@ class WaylandInput {
     bool pointerAxisDiscrete(std::uint32_t axis, int steps);
     bool keyboardKeycode(std::uint32_t keycode, bool pressed, bool repeated = false);
     bool keyboardKeysym(std::uint32_t keysym, bool pressed);
+    [[nodiscard]] bool isKeycodePressed(std::uint32_t keycode) const { return m_pressedKeycodes.contains(keycode); }
     [[nodiscard]] QRect logicalBounds() const;
     [[nodiscard]] std::optional<ResolvedKey> resolveKeysym(std::uint32_t keysym) {
         return m_keyResolver.resolveOrExtend(keysym, m_pressedKeycodes);

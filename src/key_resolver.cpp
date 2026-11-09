@@ -1,11 +1,14 @@
 #include "key_resolver.hpp"
+#include "security_policy.hpp"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstdlib>
 #include <linux/input-event-codes.h>
 #include <sstream>
+#include <QDebug>
 
 namespace hkcf {
 
@@ -24,14 +27,20 @@ void KeyResolver::XkbStateDeleter::operator()(xkb_state* state) const {
         xkb_state_unref(state);
 }
 
-KeyResolver::KeyResolver()
-    : KeyResolver(nullptr) {}
+std::int64_t KeyResolver::monotonicTimeMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
-KeyResolver::KeyResolver(const xkb_rule_names& names)
-    : KeyResolver(&names) {}
+KeyResolver::KeyResolver(Clock clock)
+    : KeyResolver(nullptr, std::move(clock)) {}
 
-KeyResolver::KeyResolver(const xkb_rule_names* names)
-    : m_context(xkb_context_new(XKB_CONTEXT_NO_FLAGS)) {
+KeyResolver::KeyResolver(const xkb_rule_names& names, Clock clock)
+    : KeyResolver(&names, std::move(clock)) {}
+
+KeyResolver::KeyResolver(const xkb_rule_names* names, Clock clock)
+    : m_context(xkb_context_new(XKB_CONTEXT_NO_FLAGS)), m_clock(std::move(clock)),
+      m_budgetTimeMs(m_clock()), m_replacementTokens(security::kKeymapReplacementBurst) {
     if (!m_context)
         return;
     m_keymap.reset(xkb_keymap_new_from_names(m_context.get(), names, XKB_KEYMAP_COMPILE_NO_FLAGS));
@@ -82,7 +91,9 @@ xkb_state* KeyResolver::createState(const std::set<std::uint32_t>& held, xkb_sta
         xkb_state_update_mask(state, xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
                               xkb_state_serialize_mods(previous, XKB_STATE_MODS_LATCHED),
                               xkb_state_serialize_mods(previous, XKB_STATE_MODS_LOCKED),
-                              0, 0, xkb_state_serialize_layout(previous, XKB_STATE_LAYOUT_EFFECTIVE));
+                              xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_DEPRESSED),
+                              xkb_state_serialize_layout(previous, XKB_STATE_LAYOUT_LATCHED),
+                              xkb_state_serialize_layout(previous, XKB_STATE_LAYOUT_LOCKED));
     }
     return state;
 }
@@ -155,6 +166,22 @@ std::optional<ResolvedKey> KeyResolver::resolveKeysym(xkb_keysym_t keysym) const
     return std::nullopt;
 }
 
+bool KeyResolver::takeReplacementToken() {
+    const auto now = std::max(m_budgetTimeMs, m_clock());
+    m_replacementTokens = std::min(double(security::kKeymapReplacementBurst),
+        m_replacementTokens + (now - m_budgetTimeMs) * (security::kKeymapReplacementsPerSecond / 1000.0));
+    m_budgetTimeMs = now;
+    if (m_replacementTokens >= 1.0) {
+        m_replacementTokens -= 1.0;
+        return true;
+    }
+    if (!m_lastBudgetWarningMs || now - *m_lastBudgetWarningMs >= security::kKeymapWarningIntervalMs) {
+        qWarning() << "keymap replacement rate limit reached; dropping unmapped symbol";
+        m_lastBudgetWarningMs = now;
+    }
+    return false;
+}
+
 std::optional<ResolvedKey> KeyResolver::resolveOrExtend(xkb_keysym_t keysym, const std::set<std::uint32_t>& held) {
     if (!valid() || !keysym || keysym > XKB_KEYSYM_MAX)
         return std::nullopt;
@@ -164,11 +191,14 @@ std::optional<ResolvedKey> KeyResolver::resolveOrExtend(xkb_keysym_t keysym, con
         const auto index = (m_nextSlot + i) % m_slots.size();
         if (held.contains(m_slots[index].code - 8))
             continue;
-        auto slots = m_slots;
-        slots[index].symbol = keysym;
+        // Charge compilation attempts, never lookups of already mapped symbols.
+        if (!takeReplacementToken())
+            return std::nullopt;
+        auto candidateSlots = m_slots;
+        candidateSlots[index].symbol = keysym;
         std::string text = m_baseText;
         std::string names, symbols;
-        for (const auto& slot : slots) {
+        for (const auto& slot : candidateSlots) {
             if (!slot.symbol)
                 continue;
             if (slot.needsName)
@@ -189,10 +219,10 @@ std::optional<ResolvedKey> KeyResolver::resolveOrExtend(xkb_keysym_t keysym, con
         if (!candidate)
             return std::nullopt;
         const xkb_keysym_t* syms;
-        if (xkb_keymap_key_get_syms_by_level(candidate.get(), slots[index].code, 0, 0, &syms) != 1 || syms[0] != keysym)
+        if (xkb_keymap_key_get_syms_by_level(candidate.get(), candidateSlots[index].code, 0, 0, &syms) != 1 || syms[0] != keysym)
             return std::nullopt;
         m_keymap = std::move(candidate);
-        m_slots = std::move(slots);
+        m_slots = std::move(candidateSlots);
         m_nextSlot = (index + 1) % m_slots.size();
         ++m_revision;
         return ResolvedKey{.evdevKeycode = m_slots[index].code - 8, .modifierKeycodes = {}};

@@ -1,5 +1,6 @@
 #include "eis_input_bridge.hpp"
 #include "input_state.hpp"
+#include "security_policy.hpp"
 #include "wayland_input.hpp"
 
 #include <QCoreApplication>
@@ -17,6 +18,9 @@ QVector<QPair<uint32_t, int>> scrolls;
 QSet<uint32_t> keys;
 QVector<QPair<uint32_t, bool>> keyEvents;
 QSet<uint32_t> buttons;
+std::int64_t resolverTimeMs = 0;
+bool failPress = false;
+uint32_t rejectedPressCode = 0;
 double absoluteX = -1, absoluteY = -1;
 void check(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
@@ -26,7 +30,7 @@ void check(bool value, const char* message) {
 // Link the real EIS bridge to a recording Wayland sink. Never connects to a
 // compositor or injects input into the user's desktop.
 namespace hkcf {
-WaylandInput::WaylandInput() = default;
+WaylandInput::WaylandInput() : m_keyResolver([] { return resolverTimeMs; }) {}
 WaylandInput::~WaylandInput() = default;
 QRect WaylandInput::logicalBounds() const { return {0, 0, 1920, 1080}; }
 bool WaylandInput::pointerMotion(double, double) { return true; }
@@ -37,6 +41,8 @@ bool WaylandInput::pointerButton(uint32_t button, bool pressed) {
 }
 bool WaylandInput::pointerAxisDiscrete(uint32_t axis, int steps) { scrolls.append({axis, steps}); return true; }
 bool WaylandInput::keyboardKeycode(uint32_t key, bool pressed, bool) {
+    if (pressed && (failPress || key == rejectedPressCode))
+        return false;
     keyEvents.append({key, pressed});
     if (pressed) {
         keys.insert(key);
@@ -76,6 +82,7 @@ void testInputState() {
     const auto held = input.resolveKeysym(XKB_KEY_Greek_alpha);
     check(held.has_value(), "dynamic symbol mapping");
     for (std::size_t i = 0; i < hkcf::KeyResolver::kMaxExtraKeysyms + 5; ++i) {
+        resolverTimeMs += 1000;
         check(inputs.keyboardKeysym(&second, 0x01000400 + i, true), "cache pressure press");
         check(inputs.keyboardKeysym(&second, 0x01000400 + i, false), "cache pressure release");
     }
@@ -83,6 +90,28 @@ void testInputState() {
           "held dynamic symbol survives eviction of released slots");
     inputs.releaseOwner(&first);
     check(keys.isEmpty(), "owner cleanup releases dynamic symbol");
+    failPress = true;
+    check(!inputs.keyboardKeycode(&first, KEY_LEFTSHIFT, true), "failed raw press");
+    check(!inputs.keyboardKeysym(&first, XKB_KEY_Aogonek, true), "failed symbol modifier press");
+    failPress = false;
+    check(inputs.keyboardKeycode(&second, KEY_LEFTSHIFT, true) && keys.contains(KEY_LEFTSHIFT),
+          "failed press does not suppress another owner's successful press");
+    inputs.releaseOwner(&second);
+    check(inputs.keyboardKeysym(&first, XKB_KEY_Aogonek, true) && keys.contains(KEY_LEFTSHIFT) && keys.contains(level3),
+          "failed symbol press retries all modifiers");
+    inputs.releaseOwner(&first);
+    check(keys.isEmpty(), "retried symbol releases all physical holds");
+    rejectedPressCode = KEY_A;
+    check(!inputs.keyboardKeysym(&first, XKB_KEY_Aogonek, true) && keys.isEmpty(),
+          "failed symbol key press releases modifiers already sent");
+    rejectedPressCode = 0;
+    check(inputs.keyboardKeysym(&first, XKB_KEY_aogonek, true), "held symbol before text");
+    keyEvents.clear();
+    check(inputs.keyboardText(XKB_KEY_aogonek), "one-shot text repeats a held symbol");
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{KEY_A, true}} && keys.contains(KEY_A) && keys.contains(level3),
+          "held one-shot text emits exactly one repeat and preserves original key/modifier holds");
+    inputs.releaseOwner(&first);
+    check(keys.isEmpty(), "original held symbol remains releasable after one-shot text");
 }
 
 void testEis() {
@@ -195,10 +224,13 @@ void testEis() {
     ei_device_frame(text, ei_now(client));
     sync();
     check(keys.contains(aogonek->evdevKeycode), "EIS text keysym press");
+    keyEvents.clear();
     ei_device_text_utf8(text, "ą");
     ei_device_frame(text, ei_now(client));
     sync();
     check(keys.contains(aogonek->evdevKeycode), "UTF-8 must preserve a held text keysym");
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{aogonek->evdevKeycode, true}},
+          "UTF-8 emits a repeat while the same TEXT_KEYSYM is held");
     ei_device_text_keysym(text, XKB_KEY_aogonek, false);
     ei_device_frame(text, ei_now(client));
     sync();
@@ -210,6 +242,26 @@ void testEis() {
     sync();
     check(keys.isEmpty(), "text stop releases held keysym");
     ei_device_start_emulating(text, 2);
+
+    // A small UTF-8 event must not trigger unbounded keymap compilation.
+    resolverTimeMs += 1000;
+    QString han;
+    for (uint point = 0x4e00; point < 0x4e00 + 65; ++point)
+        han += QChar(point);
+    const auto utf8 = han.toUtf8();
+    check(utf8.size() == 195, "65 Han characters use only 195 UTF-8 bytes");
+    keyEvents.clear();
+    ei_device_text_utf8(text, utf8.constData());
+    ei_device_frame(text, ei_now(client));
+    sync();
+    check(keyEvents.size() == 2 * hkcf::security::kKeymapReplacementBurst && keys.isEmpty(),
+          "EIS text drops over-budget symbols without leaving holds");
+    keyEvents.clear();
+    const auto mappedHan = QString(QChar(0x4e00)).toUtf8();
+    ei_device_text_utf8(text, mappedHan.constData());
+    ei_device_frame(text, ei_now(client));
+    sync();
+    check(keyEvents.size() == 2 && keys.isEmpty(), "mapped EIS text still works after budget exhaustion");
 
     // Compare with eis-repeat-test's direct libei/libeis control. Repeats use
     // separate frames; libeis filters duplicate states before the bridge sees them.
@@ -322,10 +374,14 @@ void testEis() {
     ei_device_frame(keyboard, ei_now(client));
     waitFor([&] { return keys.contains(KEY_LEFTALT); }, "recreated keyboard input");
     ei_seat_unref(seat);
+    // The budget test above filled every dynamic slot; aogonek is remapped to a
+    // new slot once the replacement budget has refilled.
+    resolverTimeMs += 1000;
+    const auto keysBeforeText = keys.size();
     ei_device_text_keysym(text, XKB_KEY_aogonek, true);
     ei_device_frame(text, ei_now(client));
     sync();
-    check(keys.contains(aogonek->evdevKeycode), "text hold before disconnect");
+    check(keys.size() == keysBeforeText + 1, "text hold before disconnect");
     ei_device_unref(text);
     ei_device_unref(keyboard); ei_device_unref(pointer); ei_device_unref(absolute);
     client = ei_unref(client);

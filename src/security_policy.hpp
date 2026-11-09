@@ -25,6 +25,10 @@ constexpr int kMaxDiscreteScrollSteps = 120;
 constexpr qint64 kNotifyRateWindowMs = 1000;
 constexpr int kMaxNotifyEventsPerWindow = 2000;
 constexpr std::size_t kMaxTextUtf8Bytes = 4096;
+constexpr int kKeymapReplacementsPerSecond = 30;
+// One full slot cache per burst, so a pasted text with many new symbols is not truncated.
+constexpr int kKeymapReplacementBurst = 64;
+constexpr std::int64_t kKeymapWarningIntervalMs = 1000;
 
 // Reject the complete event before injecting any input, including incomplete
 // trailing sequences. A text event is not a streaming UTF-8 fragment.
