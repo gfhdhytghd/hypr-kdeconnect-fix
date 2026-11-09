@@ -37,6 +37,9 @@ void waitFor(Condition condition, Pump pump, const char* message) {
 namespace hkcf {
 WaylandInput::WaylandInput() = default;
 WaylandInput::~WaylandInput() = default;
+std::optional<ResolvedKey> WaylandInput::resolveKeysym(std::uint32_t symbol) {
+    return m_keyResolver.resolveOrExtend(symbol, m_pressedKeycodes, m_xkbState);
+}
 bool WaylandInput::ensureReady() { return true; }
 QString WaylandInput::lastError() const { return {}; }
 QRect WaylandInput::logicalBounds() const { return {0, 0, 1920, 1080}; }

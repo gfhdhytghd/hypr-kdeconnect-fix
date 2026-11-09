@@ -201,11 +201,7 @@ bool WaylandInput::sendKeyboardKeymap() {
         setError(QStringLiteral("failed to serialize xkb keymap"));
         return false;
     }
-    // Rebuild per-key counts, and preserve locks/latches across replacement.
-    const auto held = m_xkbState ? m_xkbHistory.heldKeys()
-                                 : std::vector<std::uint32_t>(m_pressedKeycodes.begin(), m_pressedKeycodes.end());
-    XkbStateHistory history;
-    auto* state = m_keyResolver.createState(held, m_xkbState, &history);
+    auto* state = m_keyResolver.createState(m_xkbState);
     if (!state)
         return false;
     const std::size_t size = keymapText.size() + 1;
@@ -231,20 +227,25 @@ bool WaylandInput::sendKeyboardKeymap() {
     }
 
     zwp_virtual_keyboard_v1_keymap(m_keyboard, kKeyboardKeymapFormatXkbV1, *fd, static_cast<std::uint32_t>(size));
-    m_xkbHistory = std::move(history);
+    const auto depressed = xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED);
+    const auto latched = xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED);
+    const auto locked = xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED);
+    const auto group = xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE);
+    zwp_virtual_keyboard_v1_modifiers(m_keyboard, depressed, latched, locked, group);
+    ok = flush();
+    close(*fd);
+    if (!ok) {
+        xkb_state_unref(state);
+        return false;
+    }
     if (m_xkbState)
         xkb_state_unref(m_xkbState);
     m_xkbState = state;
-    m_lastDepressed = xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED);
-    m_lastLatched = xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED);
-    m_lastLocked = xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED);
-    m_lastGroup = xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE);
-    zwp_virtual_keyboard_v1_modifiers(m_keyboard, m_lastDepressed, m_lastLatched, m_lastLocked, m_lastGroup);
-    ok = flush();
-    if (ok)
-        m_uploadedRevision = m_keyResolver.revision();
-    close(*fd);
-    return ok;
+    m_lastDepressed = depressed;
+    m_lastLatched = latched;
+    m_lastLocked = locked;
+    m_lastGroup = group;
+    return true;
 }
 
 bool WaylandInput::pointerMotion(double dx, double dy) {
@@ -352,10 +353,6 @@ bool WaylandInput::keyboardKeycode(std::uint32_t keycode, bool pressed, bool rep
     if (!ensureReady())
         return false;
 
-    // Held keycodes are pinned across replacements. Release them using the old
-    // map if uploading the pending revision fails; retry that revision later.
-    if (m_uploadedRevision != m_keyResolver.revision() && !sendKeyboardKeymap() && pressed)
-        return false;
     const bool wasHeld = m_pressedKeycodes.contains(keycode);
     if (pressed)
         m_pressedKeycodes.insert(keycode);
@@ -376,23 +373,12 @@ void WaylandInput::updateModifiers(std::uint32_t keycode, bool pressed) {
     if (!m_keyboard || !m_xkbState)
         return;
 
-    const auto direction = pressed ? XKB_KEY_DOWN : XKB_KEY_UP;
-    xkb_state_update_key(m_xkbState, static_cast<xkb_keycode_t>(keycode + 8), direction);
-    m_xkbHistory.record(keycode, direction);
+    xkb_state_update_key(m_xkbState, static_cast<xkb_keycode_t>(keycode + 8), pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
 
     const std::uint32_t depressed = xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_DEPRESSED);
     const std::uint32_t latched = xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LATCHED);
     const std::uint32_t locked = xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LOCKED);
     const std::uint32_t group = xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_EFFECTIVE);
-
-    // With no held key and no latch, no action filter is pending: a mask
-    // snapshot reproduces the state exactly. Compacting here keeps the replay
-    // log short so it never overflows and blocks later keymap replacements.
-    if (m_xkbHistory.heldKeys().empty() && latched == 0 && xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_LATCHED) == 0) {
-        m_xkbHistory.reset({}, std::array<std::uint32_t, 6>{depressed, latched, locked,
-                                                            xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_DEPRESSED), 0,
-                                                            xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_LOCKED)});
-    }
 
     if (depressed == m_lastDepressed && latched == m_lastLatched && locked == m_lastLocked && group == m_lastGroup)
         return;
@@ -404,6 +390,18 @@ void WaylandInput::updateModifiers(std::uint32_t keycode, bool pressed) {
 
     zwp_virtual_keyboard_v1_modifiers(m_keyboard, depressed, latched, locked, group);
     flush();
+}
+
+std::optional<ResolvedKey> WaylandInput::resolveKeysym(std::uint32_t keysym) {
+    if (!ensureReady())
+        return std::nullopt;
+    const auto revision = m_keyResolver.revision();
+    auto resolved = m_keyResolver.resolveOrExtend(keysym, m_pressedKeycodes, m_xkbState);
+    if (m_keyResolver.revision() != revision && !sendKeyboardKeymap()) {
+        m_keyResolver.rollback();
+        return std::nullopt;
+    }
+    return resolved;
 }
 
 bool WaylandInput::keyboardKeysym(std::uint32_t keysym, bool pressed) {
@@ -419,8 +417,7 @@ bool WaylandInput::keyboardKeysym(std::uint32_t keysym, bool pressed) {
     if (!resolved)
         return false;
     if (pressed) {
-        // Do not create logical holds when a pending map cannot be uploaded.
-        if (!ensureReady() || (m_uploadedRevision != m_keyResolver.revision() && !sendKeyboardKeymap()))
+        if (!ensureReady())
             return false;
         if (!repeated) {
             m_heldKeysyms.insert(keysym, *resolved);

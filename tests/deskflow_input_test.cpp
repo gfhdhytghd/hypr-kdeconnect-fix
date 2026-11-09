@@ -32,6 +32,9 @@ void check(bool value, const char* message) {
 namespace hkcf {
 WaylandInput::WaylandInput() : m_keyResolver([] { return resolverTimeMs; }) {}
 WaylandInput::~WaylandInput() = default;
+std::optional<ResolvedKey> WaylandInput::resolveKeysym(std::uint32_t symbol) {
+    return m_keyResolver.resolveOrExtend(symbol, m_pressedKeycodes, m_xkbState);
+}
 QRect WaylandInput::logicalBounds() const { return {0, 0, 1920, 1080}; }
 bool WaylandInput::pointerMotion(double, double) { return true; }
 bool WaylandInput::pointerMotionAbsolute(double x, double y) { absoluteX = x; absoluteY = y; return true; }
@@ -83,13 +86,15 @@ void testInputState() {
     check(held.has_value(), "dynamic symbol mapping");
     for (std::size_t i = 0; i < hkcf::KeyResolver::kMaxExtraKeysyms + 5; ++i) {
         resolverTimeMs += 1000;
-        check(inputs.keyboardKeysym(&second, 0x01000400 + i, true), "cache pressure press");
-        check(inputs.keyboardKeysym(&second, 0x01000400 + i, false), "cache pressure release");
+        check(!inputs.keyboardKeysym(&second, 0x01000400 + i, true), "held dynamic symbol blocks replacement");
     }
     check(input.resolveKeysym(XKB_KEY_Greek_alpha)->evdevKeycode == held->evdevKeycode && keys.contains(held->evdevKeycode),
-          "held dynamic symbol survives eviction of released slots");
+          "refused replacement preserves the held dynamic symbol");
     inputs.releaseOwner(&first);
     check(keys.isEmpty(), "owner cleanup releases dynamic symbol");
+    check(inputs.keyboardKeysym(&second, 0x01000400, true), "released dynamic symbol permits replacement");
+    inputs.releaseOwner(&second);
+    check(keys.isEmpty(), "replacement symbol releases cleanly");
     failPress = true;
     check(!inputs.keyboardKeycode(&first, KEY_LEFTSHIFT, true), "failed raw press");
     check(!inputs.keyboardKeysym(&first, XKB_KEY_Aogonek, true), "failed symbol modifier press");
@@ -385,6 +390,10 @@ void testEis() {
     ei_device_frame(keyboard, ei_now(client));
     waitFor([&] { return keys.contains(KEY_LEFTALT); }, "recreated keyboard input");
     ei_seat_unref(seat);
+    // Dynamic replacements require that no key is held.
+    ei_device_keyboard_key(keyboard, KEY_LEFTALT, false);
+    ei_device_frame(keyboard, ei_now(client));
+    waitFor([&] { return !keys.contains(KEY_LEFTALT); }, "recreated keyboard release");
     // The budget test above filled every dynamic slot; aogonek is remapped to a
     // new slot once the replacement budget has refilled.
     resolverTimeMs += 1000;
