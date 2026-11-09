@@ -231,6 +231,9 @@ int main(int argc, char **argv) {
       for (int i = 0; i < 1000; ++i) {
         check(input.keyboardKeysym('a', true), "long session press");
         check(input.keyboardKeysym('a', false), "long session release");
+        // Let the server drain the socket so flush never sees EAGAIN.
+        if (i % 64 == 0)
+          sync();
       }
       check(input.keyboardKeycode(KEY_CAPSLOCK, true), "lock Caps Lock press");
       check(input.keyboardKeycode(KEY_CAPSLOCK, false), "lock Caps Lock release");
