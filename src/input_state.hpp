@@ -30,7 +30,6 @@ class InputState {
     static bool update(PressedInputs& inputs, const void* owner, std::uint32_t code, bool pressed);
 
     WaylandInput& m_input;
-    KeyResolver m_resolver;
     PressedInputs m_keys;
     PressedInputs m_buttons;
     // Stable tokens distinguish a keysym's physical keys from raw keycodes.

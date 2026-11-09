@@ -25,7 +25,8 @@ Implemented:
 - pointer button events
 - smooth and discrete scrolling
 - keyboard keycode input
-- keyboard keysym input through `xkbcommon`
+- keyboard keysym input with Shift/AltGr resolution through `xkbcommon`
+- Unicode keyboard text through EIS text events and a bounded dynamic keymap
 - libei `ConnectToEIS` sender clients through a minimal `libeis` bridge
 
 Not implemented:

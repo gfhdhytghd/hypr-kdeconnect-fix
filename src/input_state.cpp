@@ -71,7 +71,7 @@ bool InputState::keyboardKeysym(const void* owner, std::uint32_t symbol, bool pr
         key = symbols->value(symbol);
     const bool repeated = !key.isNull();
     if (!key) {
-        const auto resolved = m_resolver.resolveKeysym(static_cast<xkb_keysym_t>(symbol));
+        const auto resolved = m_input.resolveKeysym(symbol);
         if (!resolved)
             return false;
         key = QSharedPointer<ResolvedKey>::create(*resolved);
@@ -80,17 +80,23 @@ bool InputState::keyboardKeysym(const void* owner, std::uint32_t symbol, bool pr
     if (pressed) {
         // Record holds even if a sink reports failure: a queued Wayland request
         // may already have been sent and still needs a release during cleanup.
-        if (!repeated && key->needsShift && !keyboardKeycode(key.data(), KEY_LEFTSHIFT, true))
-            return false;
+        if (!repeated) {
+            for (const auto code : key->modifierKeycodes) {
+                if (!keyboardKeycode(key.data(), code, true))
+                    return false;
+            }
+        }
         return keyboardKeycode(key.data(), key->evdevKeycode, true);
     }
     const bool ok = keyboardKeycode(key.data(), key->evdevKeycode, false);
-    const bool shiftOk = !key->needsShift || keyboardKeycode(key.data(), KEY_LEFTSHIFT, false);
+    bool modifiersOk = true;
+    for (auto it = key->modifierKeycodes.rbegin(); it != key->modifierKeycodes.rend(); ++it)
+        modifiersOk = keyboardKeycode(key.data(), *it, false) && modifiersOk;
     symbols = m_keysyms.find(owner);
     symbols->remove(symbol);
     if (symbols->isEmpty())
         m_keysyms.erase(symbols);
-    return ok && shiftOk;
+    return ok && modifiersOk;
 }
 
 void InputState::releaseOwner(const void* owner) {

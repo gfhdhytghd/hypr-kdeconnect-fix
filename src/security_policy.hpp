@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 
 #include <QString>
+#include <QStringDecoder>
 
 #include <linux/input-event-codes.h>
 #include <xkbcommon/xkbcommon.h>
@@ -22,6 +24,22 @@ constexpr double kMaxAxisDelta = 1000.0;
 constexpr int kMaxDiscreteScrollSteps = 120;
 constexpr qint64 kNotifyRateWindowMs = 1000;
 constexpr int kMaxNotifyEventsPerWindow = 2000;
+constexpr std::size_t kMaxTextUtf8Bytes = 4096;
+
+// Reject the complete event before injecting any input, including incomplete
+// trailing sequences. A text event is not a streaming UTF-8 fragment.
+inline std::optional<QString> decodeTextUtf8(const char* text) {
+    if (!text)
+        return std::nullopt;
+    const auto length = strnlen(text, kMaxTextUtf8Bytes + 1);
+    if (length > kMaxTextUtf8Bytes)
+        return std::nullopt;
+    QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::Stateless);
+    const QString decoded = decoder(QByteArrayView(text, static_cast<qsizetype>(length)));
+    if (decoder.hasError())
+        return std::nullopt;
+    return decoded;
+}
 
 inline QString normalizedAppId(const QString& appId) {
     return appId.trimmed();

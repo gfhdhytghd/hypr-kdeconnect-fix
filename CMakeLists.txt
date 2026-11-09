@@ -194,6 +194,7 @@ if(BUILD_TESTING)
   )
   hkcf_apply_target_defaults(deskflow-input-test)
   add_test(NAME deskflow-input-test COMMAND deskflow-input-test)
+  add_test(NAME input-state-test COMMAND deskflow-input-test --state-only)
 
   add_executable(eis-repeat-test tests/eis_repeat_test.cpp)
   target_link_libraries(eis-repeat-test PRIVATE Qt6::Core hkcf-libeis hkcf-libei)

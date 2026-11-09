@@ -38,9 +38,51 @@ bool WaylandInput::pointerButton(uint32_t button, bool pressed) {
 bool WaylandInput::pointerAxisDiscrete(uint32_t axis, int steps) { scrolls.append({axis, steps}); return true; }
 bool WaylandInput::keyboardKeycode(uint32_t key, bool pressed, bool) {
     keyEvents.append({key, pressed});
-    if (pressed) keys.insert(key); else keys.remove(key);
+    if (pressed) {
+        keys.insert(key);
+        m_pressedKeycodes.insert(key);
+    } else {
+        keys.remove(key);
+        m_pressedKeycodes.erase(key);
+    }
     return true;
 }
+}
+
+void testInputState() {
+    qputenv("XKB_DEFAULT_LAYOUT", "pl");
+    qputenv("XKB_DEFAULT_VARIANT", "");
+    qputenv("XKB_DEFAULT_OPTIONS", "");
+    hkcf::WaylandInput input;
+    hkcf::InputState inputs(input);
+    int rawOwner, first, second, third;
+    const auto ogonek = input.resolveKeysym(XKB_KEY_aogonek);
+    check(ogonek && ogonek->modifierKeycodes.size() == 1, "Polish level-3 modifier");
+    const auto level3 = ogonek->modifierKeycodes.front();
+    check(inputs.keyboardKeycode(&rawOwner, level3, true), "raw AltGr hold");
+    check(inputs.keyboardKeysym(&first, XKB_KEY_aogonek, true), "first AltGr symbol");
+    check(inputs.keyboardKeysym(&first, XKB_KEY_aogonek, true), "repeated AltGr symbol");
+    check(inputs.keyboardKeysym(&second, XKB_KEY_eogonek, true), "second AltGr symbol");
+    check(inputs.keyboardKeysym(&third, XKB_KEY_Aogonek, true), "Shift plus AltGr symbol");
+    inputs.releaseOwner(&first);
+    check(keys.contains(KEY_A) && keys.contains(level3), "overlapping upper symbol retains physical key and modifier");
+    inputs.releaseOwner(&third);
+    check(!keys.contains(KEY_A) && !keys.contains(KEY_LEFTSHIFT), "upper symbol releases its key and Shift");
+    inputs.releaseOwner(&rawOwner);
+    check(keys.contains(level3), "another owner retains AltGr");
+    inputs.releaseOwner(&second);
+    check(keys.isEmpty(), "last owner releases AltGr");
+    check(inputs.keyboardKeysym(&first, XKB_KEY_Greek_alpha, true), "hold dynamic symbol");
+    const auto held = input.resolveKeysym(XKB_KEY_Greek_alpha);
+    check(held.has_value(), "dynamic symbol mapping");
+    for (std::size_t i = 0; i < hkcf::KeyResolver::kMaxExtraKeysyms + 5; ++i) {
+        check(inputs.keyboardKeysym(&second, 0x01000400 + i, true), "cache pressure press");
+        check(inputs.keyboardKeysym(&second, 0x01000400 + i, false), "cache pressure release");
+    }
+    check(input.resolveKeysym(XKB_KEY_Greek_alpha)->evdevKeycode == held->evdevKeycode && keys.contains(held->evdevKeycode),
+          "held dynamic symbol survives eviction of released slots");
+    inputs.releaseOwner(&first);
+    check(keys.isEmpty(), "owner cleanup releases dynamic symbol");
 }
 
 void testEis() {
@@ -54,6 +96,7 @@ void testEis() {
     ei_configure_name(client, "deskflow-input-test");
     check(ei_setup_backend_fd(client, *fd) == 0, "connect libei sender");
     ei_device* keyboard = nullptr;
+    ei_device* text = nullptr;
     ei_device* pointer = nullptr;
     ei_device* absolute = nullptr;
     ei* secondClient = nullptr;
@@ -68,7 +111,7 @@ void testEis() {
                 auto* device = ei_event_get_device(event);
                 switch (ei_event_get_type(event)) {
                 case EI_EVENT_SEAT_ADDED:
-                    ei_seat_bind_capabilities(ei_event_get_seat(event), EI_DEVICE_CAP_KEYBOARD,
+                    ei_seat_bind_capabilities(ei_event_get_seat(event), EI_DEVICE_CAP_KEYBOARD, EI_DEVICE_CAP_TEXT,
                         EI_DEVICE_CAP_POINTER, EI_DEVICE_CAP_POINTER_ABSOLUTE,
                         EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_SCROLL, nullptr);
                     break;
@@ -81,6 +124,8 @@ void testEis() {
                     }
                     if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD) && !keyboard)
                         keyboard = ei_device_ref(device);
+                    if (ei_device_has_capability(device, EI_DEVICE_CAP_TEXT) && !text)
+                        text = ei_device_ref(device);
                     if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER) && !pointer)
                         pointer = ei_device_ref(device);
                     if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER_ABSOLUTE) && !absolute)
@@ -99,7 +144,7 @@ void testEis() {
         while (!condition() && timer.elapsed() < 3000) { pump(); QThread::msleep(1); }
         check(condition() && !disconnected, message);
     };
-    waitFor([&] { return keyboard && pointer && absolute; }, "EIS device discovery");
+    waitFor([&] { return keyboard && text && pointer && absolute; }, "EIS device discovery");
     check(ei_device_has_capability(absolute, EI_DEVICE_CAP_BUTTON), "absolute pointer buttons");
     check(ei_device_has_capability(absolute, EI_DEVICE_CAP_SCROLL), "absolute pointer scroll");
     auto* region = ei_device_get_region(absolute, 0);
@@ -136,6 +181,36 @@ void testEis() {
         ei_device_frame(absolute, ei_now(client));
         waitFor([&] { return absoluteX == barrierX; }, "input barrier");
     };
+    const auto aogonek = input.resolveKeysym(XKB_KEY_aogonek);
+    const auto eogonek = input.resolveKeysym(XKB_KEY_eogonek);
+    check(aogonek && eogonek, "text symbols resolve");
+    keyEvents.clear();
+    ei_device_text_utf8(text, "ąę");
+    ei_device_frame(text, ei_now(client));
+    sync();
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{aogonek->evdevKeycode, true}, {aogonek->evdevKeycode, false},
+                                                    {eogonek->evdevKeycode, true}, {eogonek->evdevKeycode, false}},
+          "EIS UTF-8 decodes both Polish code points in order");
+    ei_device_text_keysym(text, XKB_KEY_aogonek, true);
+    ei_device_frame(text, ei_now(client));
+    sync();
+    check(keys.contains(aogonek->evdevKeycode), "EIS text keysym press");
+    ei_device_text_utf8(text, "ą");
+    ei_device_frame(text, ei_now(client));
+    sync();
+    check(keys.contains(aogonek->evdevKeycode), "UTF-8 must preserve a held text keysym");
+    ei_device_text_keysym(text, XKB_KEY_aogonek, false);
+    ei_device_frame(text, ei_now(client));
+    sync();
+    check(keys.isEmpty(), "EIS text keysym release");
+    ei_device_text_keysym(text, XKB_KEY_eogonek, true);
+    ei_device_frame(text, ei_now(client));
+    sync();
+    ei_device_stop_emulating(text);
+    sync();
+    check(keys.isEmpty(), "text stop releases held keysym");
+    ei_device_start_emulating(text, 2);
+
     // Compare with eis-repeat-test's direct libei/libeis control. Repeats use
     // separate frames; libeis filters duplicate states before the bridge sees them.
     keyEvents.clear();
@@ -247,6 +322,11 @@ void testEis() {
     ei_device_frame(keyboard, ei_now(client));
     waitFor([&] { return keys.contains(KEY_LEFTALT); }, "recreated keyboard input");
     ei_seat_unref(seat);
+    ei_device_text_keysym(text, XKB_KEY_aogonek, true);
+    ei_device_frame(text, ei_now(client));
+    sync();
+    check(keys.contains(aogonek->evdevKeycode), "text hold before disconnect");
+    ei_device_unref(text);
     ei_device_unref(keyboard); ei_device_unref(pointer); ei_device_unref(absolute);
     client = ei_unref(client);
     waitFor([&] { return keys.isEmpty(); }, "disconnect releases held key");
@@ -255,6 +335,14 @@ void testEis() {
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
+        if (app.arguments().contains(QStringLiteral("--state-only"))) {
+            testInputState();
+            std::cout << "InputState AltGr ownership and dynamic keymap cache passed\n";
+            return 0;
+        }
+        qputenv("XKB_DEFAULT_LAYOUT", "us");
+        qputenv("XKB_DEFAULT_VARIANT", "");
+        qputenv("XKB_DEFAULT_OPTIONS", "");
         testEis();
         std::cout << "Deskflow EIS discovery, absolute motion, scroll, keys and cleanup passed\n";
         return 0;
