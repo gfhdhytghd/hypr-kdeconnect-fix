@@ -187,6 +187,29 @@ std::optional<ResolvedKey> KeyResolver::resolveOrExtend(xkb_keysym_t keysym, con
         return std::nullopt;
     if (auto key = resolveKeysym(keysym))
         return key;
+    // Replaying a held lock/latch action cannot reconstruct its release-time
+    // behavior. Only plain SetMods/NoAction holds are safe across replacement.
+    for (const auto code : held) {
+        XkbStatePtr probe(xkb_state_new(m_keymap.get()));
+        if (!probe)
+            return std::nullopt;
+        xkb_state_update_key(probe.get(), code + 8, XKB_KEY_DOWN);
+        const bool changesLocksOrLayout =
+            xkb_state_serialize_mods(probe.get(), XKB_STATE_MODS_LATCHED) ||
+            xkb_state_serialize_mods(probe.get(), XKB_STATE_MODS_LOCKED) ||
+            xkb_state_serialize_layout(probe.get(), XKB_STATE_LAYOUT_EFFECTIVE);
+        xkb_state_update_key(probe.get(), code + 8, XKB_KEY_UP);
+        // LatchMods may only latch on release, looking like SetMods on press.
+        if (!changesLocksOrLayout && !xkb_state_serialize_mods(probe.get(), XKB_STATE_MODS_EFFECTIVE) &&
+            !xkb_state_serialize_layout(probe.get(), XKB_STATE_LAYOUT_EFFECTIVE))
+            continue;
+        const auto now = m_clock();
+        if (!m_lastHeldWarningMs || now - *m_lastHeldWarningMs >= security::kKeymapWarningIntervalMs) {
+            qWarning() << "keymap replacement blocked by held non-momentary key; dropping unmapped symbol";
+            m_lastHeldWarningMs = now;
+        }
+        return std::nullopt;
+    }
     for (std::size_t i = 0; i < m_slots.size(); ++i) {
         const auto index = (m_nextSlot + i) % m_slots.size();
         if (held.contains(m_slots[index].code - 8))

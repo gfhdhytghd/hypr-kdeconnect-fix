@@ -11,9 +11,12 @@
 namespace {
 
 int budgetWarnings = 0;
+int heldWarnings = 0;
 void countBudgetWarnings(QtMsgType type, const QMessageLogContext&, const QString& message) {
     if (type == QtWarningMsg && message.contains("keymap replacement rate limit"))
         ++budgetWarnings;
+    if (type == QtWarningMsg && message.contains("keymap replacement blocked by held"))
+        ++heldWarnings;
 }
 
 int expect(bool condition, const char* message) {
@@ -117,7 +120,8 @@ int main() {
     xkb_state_update_key(oldState, KEY_CAPSLOCK + 8, XKB_KEY_DOWN);
     xkb_state_update_key(oldState, KEY_CAPSLOCK + 8, XKB_KEY_UP);
     const auto oldLocks = xkb_state_serialize_mods(oldState, XKB_STATE_MODS_LOCKED);
-    failures += expect(resolver.resolveOrExtend(XKB_KEY_eogonek).has_value(), "extend while modifiers are held");
+    failures += expect(resolver.resolveOrExtend(XKB_KEY_eogonek, {KEY_LEFTSHIFT, KEY_RIGHTSHIFT}).has_value(),
+                       "extend while momentary modifiers are held");
     auto* newState = resolver.createState({KEY_LEFTSHIFT, KEY_RIGHTSHIFT}, oldState);
     failures += expect(xkb_state_serialize_mods(newState, XKB_STATE_MODS_DEPRESSED) != 0 &&
                        xkb_state_serialize_mods(newState, XKB_STATE_MODS_LOCKED) == oldLocks,
@@ -128,6 +132,45 @@ int main() {
     failures += expect(xkb_state_serialize_mods(newState, XKB_STATE_MODS_DEPRESSED) == 0, "replacement permits balanced modifier releases");
     xkb_state_unref(oldState);
     xkb_state_unref(newState);
+
+    std::int64_t capsNow = 0;
+    hkcf::KeyResolver caps(names, [&] { return capsNow; });
+    auto* capsState = caps.createState({});
+    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_DOWN);
+    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+    failures += expect(xkb_state_mod_name_is_active(capsState, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
+                       "Caps Lock starts on");
+    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_DOWN);
+    const auto capsRevision = caps.revision();
+    const auto heldHandler = qInstallMessageHandler(countBudgetWarnings);
+    for (int i = 0; i < 65; ++i)
+        failures += expect(!caps.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_CAPSLOCK}),
+                           "held Caps Lock refuses extension");
+    failures += expect(caps.revision() == capsRevision && caps.keymap() == xkb_state_get_keymap(capsState) &&
+                       !caps.resolveKeysym(XKB_KEY_Greek_alpha), "refusal leaves keymap and revision unchanged");
+    failures += expect(caps.resolveOrExtend(XKB_KEY_a, {KEY_CAPSLOCK}).has_value(),
+                       "mapped symbols still resolve while Caps Lock is held");
+    failures += expect(heldWarnings == 1, "held-key warnings are rate limited");
+    capsNow += hkcf::security::kKeymapWarningIntervalMs;
+    for (int i = 0; i < 65; ++i)
+        failures += expect(!caps.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_CAPSLOCK}),
+                           "held Caps Lock still refuses extension after warning interval");
+    failures += expect(heldWarnings == 2, "held-key warning resumes after its interval");
+    xkb_state_update_key(capsState, KEY_CAPSLOCK + 8, XKB_KEY_UP);
+    failures += expect(!xkb_state_mod_name_is_active(capsState, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
+                       "original Caps Lock release turns it off after refused extension");
+    // Keep time fixed: refused attempts must leave the entire burst available.
+    failures += expect(caps.resolveOrExtend(XKB_KEY_Greek_alpha).has_value(), "released Caps Lock permits the refused symbol");
+    for (int i = 1; i < hkcf::security::kKeymapReplacementBurst; ++i)
+        failures += expect(caps.resolveOrExtend(xkb_utf32_to_keysym(0x4e00 + i)).has_value(),
+                           "release permits extension with the full replacement budget");
+    auto* capsAfter = caps.createState({}, capsState);
+    failures += expect(!xkb_state_mod_name_is_active(capsAfter, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
+                       "replacement after release preserves Caps Lock off");
+    qInstallMessageHandler(heldHandler);
+    xkb_state_unref(capsState);
+    xkb_state_unref(capsAfter);
+
     std::set<std::uint32_t> pinned;
     if (dynamic) pinned.insert(dynamic->evdevKeycode);
     if (const auto key = resolver.resolveKeysym(XKB_KEY_eogonek)) pinned.insert(key->evdevKeycode);
@@ -153,14 +196,13 @@ int main() {
     auto* beforeGroup = groups.createState({KEY_COMPOSE});
     failures += expect(xkb_state_serialize_layout(beforeGroup, XKB_STATE_LAYOUT_DEPRESSED) == 1,
                        "Menu temporarily selects the second group");
-    failures += expect(groups.resolveOrExtend(XKB_KEY_Greek_alpha).has_value(), "extend with Menu held");
-    auto* afterGroup = groups.createState({KEY_COMPOSE}, beforeGroup);
-    failures += expect(xkb_state_serialize_layout(afterGroup, XKB_STATE_LAYOUT_DEPRESSED) == 1 &&
-                       xkb_state_serialize_layout(afterGroup, XKB_STATE_LAYOUT_LOCKED) == 0,
-                       "replacement retains depressed group without locking it");
-    xkb_state_update_key(afterGroup, KEY_COMPOSE + 8, XKB_KEY_UP);
+    failures += expect(!groups.resolveOrExtend(XKB_KEY_Greek_alpha, {KEY_COMPOSE}),
+                       "held layout action is not a plain SetMods/NoAction hold");
+    xkb_state_update_key(beforeGroup, KEY_COMPOSE + 8, XKB_KEY_UP);
+    failures += expect(groups.resolveOrExtend(XKB_KEY_Greek_alpha).has_value(), "extend after Menu release");
+    auto* afterGroup = groups.createState({}, beforeGroup);
     failures += expect(xkb_state_serialize_layout(afterGroup, XKB_STATE_LAYOUT_EFFECTIVE) == 0,
-                       "Menu release restores the first group after replacement");
+                       "replacement after Menu release retains the first group");
     xkb_state_unref(beforeGroup);
     xkb_state_unref(afterGroup);
 

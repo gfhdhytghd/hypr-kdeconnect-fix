@@ -121,11 +121,15 @@ bool InputState::keyboardText(std::uint32_t symbol) {
     const bool held = isPressed(m_keys, key->evdevKeycode);
     int owner;
     const bool pressed = keyboardKeysym(&owner, symbol, true);
-    // A shared hold suppresses the normal press. Emit a repeat without adding
-    // an XKB modifier hold, then retain the original owner's physical hold.
-    const bool repeated = !pressed || !held || m_input.keyboardKeycode(key->evdevKeycode, true, true);
+    // Hyprland drops duplicate presses. Retrigger the shared key while the
+    // symbol's modifiers are applied, without changing its logical XKB hold.
+    bool retriggered = true;
+    if (pressed && held) {
+        const bool released = m_input.keyboardKeycode(key->evdevKeycode, false, true);
+        retriggered = m_input.keyboardKeycode(key->evdevKeycode, true, true) && released;
+    }
     const bool released = keyboardKeysym(&owner, symbol, false);
-    return pressed && repeated && released;
+    return pressed && retriggered && released;
 }
 
 void InputState::releaseOwner(const void* owner) {

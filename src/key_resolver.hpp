@@ -75,6 +75,7 @@ class KeyResolver {
     std::int64_t m_budgetTimeMs;
     double m_replacementTokens;
     std::optional<std::int64_t> m_lastBudgetWarningMs;
+    std::optional<std::int64_t> m_lastHeldWarningMs;
 };
 
 } // namespace hkcf

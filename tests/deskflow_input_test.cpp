@@ -107,11 +107,20 @@ void testInputState() {
     rejectedPressCode = 0;
     check(inputs.keyboardKeysym(&first, XKB_KEY_aogonek, true), "held symbol before text");
     keyEvents.clear();
-    check(inputs.keyboardText(XKB_KEY_aogonek), "one-shot text repeats a held symbol");
-    check(keyEvents == QVector<QPair<uint32_t, bool>>{{KEY_A, true}} && keys.contains(KEY_A) && keys.contains(level3),
-          "held one-shot text emits exactly one repeat and preserves original key/modifier holds");
-    inputs.releaseOwner(&first);
-    check(keys.isEmpty(), "original held symbol remains releasable after one-shot text");
+    check(inputs.keyboardText(XKB_KEY_aogonek), "one-shot text retriggers a held symbol");
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{KEY_A, false}, {KEY_A, true}} &&
+          keys.contains(KEY_A) && keys.contains(level3) && input.isKeycodePressed(KEY_A),
+          "held text releases then presses the key, preserving original key/modifier holds");
+    keyEvents.clear();
+    check(inputs.keyboardKeysym(&first, XKB_KEY_aogonek, false), "original symbol release after text");
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{KEY_A, false}, {level3, false}} && keys.isEmpty(),
+          "original symbol release balances the retriggered key and modifier");
+    check(inputs.keyboardKeycode(&rawOwner, KEY_A, true), "raw key held before modified text");
+    keyEvents.clear();
+    check(inputs.keyboardText(XKB_KEY_aogonek), "text applies AltGr to a held raw key");
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{level3, true}, {KEY_A, false}, {KEY_A, true}, {level3, false}} &&
+          keys == QSet<uint32_t>{KEY_A}, "text brackets the retrigger with its own modifier");
+    check(inputs.keyboardKeycode(&rawOwner, KEY_A, false) && keys.isEmpty(), "raw release leaves no stuck keys");
 }
 
 void testEis() {
@@ -229,12 +238,14 @@ void testEis() {
     ei_device_frame(text, ei_now(client));
     sync();
     check(keys.contains(aogonek->evdevKeycode), "UTF-8 must preserve a held text keysym");
-    check(keyEvents == QVector<QPair<uint32_t, bool>>{{aogonek->evdevKeycode, true}},
-          "UTF-8 emits a repeat while the same TEXT_KEYSYM is held");
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{aogonek->evdevKeycode, false}, {aogonek->evdevKeycode, true}},
+          "UTF-8 releases then presses the key while the same TEXT_KEYSYM is held");
+    keyEvents.clear();
     ei_device_text_keysym(text, XKB_KEY_aogonek, false);
     ei_device_frame(text, ei_now(client));
     sync();
-    check(keys.isEmpty(), "EIS text keysym release");
+    check(keyEvents == QVector<QPair<uint32_t, bool>>{{aogonek->evdevKeycode, false}} && keys.isEmpty(),
+          "original TEXT_KEYSYM release leaves no stuck keys after UTF-8");
     ei_device_text_keysym(text, XKB_KEY_eogonek, true);
     ei_device_frame(text, ei_now(client));
     sync();
