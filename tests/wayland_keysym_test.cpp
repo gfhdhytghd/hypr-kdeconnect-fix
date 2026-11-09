@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QThread>
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <iostream>
 #include <linux/input-event-codes.h>
@@ -16,6 +17,8 @@
 #include <unistd.h>
 #include <vector>
 #include <wayland-server.h>
+#include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
 struct Key {
   uint32_t code, state;
 };
@@ -23,23 +26,52 @@ struct Capture {
   std::mutex mutex;
   std::vector<Key> keys;
   std::vector<uint32_t> mods;
+  std::vector<xkb_keysym_t> symbols;
+  xkb_state* state = nullptr;
+  int maps = 0;
+  bool mapError = false;
   uint32_t x = 0, y = 0, w = 0, h = 0;
   std::atomic<int> frames = 0;
 };
 Capture capture;
+bool failKeymapWrite = false;
+int keymapWriteAttempts = 0;
+extern "C" int __real_ftruncate(int, off_t);
+extern "C" int __wrap_ftruncate(int fd, off_t size) {
+  ++keymapWriteAttempts;
+  if (failKeymapWrite) {
+    errno = ENOSPC;
+    return -1;
+  }
+  return __real_ftruncate(fd, size);
+}
 void destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
-void keyboardMap(wl_client *, wl_resource *, uint32_t, int32_t fd, uint32_t) {
+void keyboardMap(wl_client *, wl_resource *, uint32_t, int32_t fd, uint32_t size) {
+  std::string text(size, '\0');
+  const auto count = pread(fd, text.data(), size, 0);
   close(fd);
+  auto* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+  auto* map = count == size ? xkb_keymap_new_from_string(context, text.c_str(),
+      XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS) : nullptr;
+  std::lock_guard lock(capture.mutex);
+  ++capture.maps;
+  if (capture.state) xkb_state_unref(capture.state);
+  capture.state = map ? xkb_state_new(map) : nullptr;
+  capture.mapError |= !capture.state;
+  if (map) xkb_keymap_unref(map);
+  xkb_context_unref(context);
 }
 void keyboardKey(wl_client *, wl_resource *, uint32_t, uint32_t key,
                  uint32_t state) {
   std::lock_guard lock(capture.mutex);
   capture.keys.push_back({key, state});
+  capture.symbols.push_back(capture.state ? xkb_state_key_get_one_sym(capture.state, key + 8) : XKB_KEY_NoSymbol);
 }
-void keyboardMods(wl_client *, wl_resource *, uint32_t d, uint32_t, uint32_t,
-                  uint32_t) {
+void keyboardMods(wl_client *, wl_resource *, uint32_t d, uint32_t latched, uint32_t locked,
+                  uint32_t group) {
   std::lock_guard lock(capture.mutex);
   capture.mods.push_back(d);
+  if (capture.state) xkb_state_update_mask(capture.state, d, latched, locked, 0, 0, group);
 }
 const struct zwp_virtual_keyboard_v1_interface keyboardImpl = {
     keyboardMap, keyboardKey, keyboardMods, destroy};
@@ -107,6 +139,9 @@ int stopServer(int fd, uint32_t, void *data) {
 
 int main(int argc, char **argv) {
   QCoreApplication app(argc, argv);
+  setenv("XKB_DEFAULT_LAYOUT", "pl", 1);
+  setenv("XKB_DEFAULT_VARIANT", "", 1);
+  setenv("XKB_DEFAULT_OPTIONS", "", 1);
   int sockets[2], control[2];
   check(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0,
         "socketpair");
@@ -164,6 +199,123 @@ int main(int argc, char **argv) {
       check(input.keyboardKeysym('A', false), "balanced release");
     }
     released();
+    check(input.keyboardKeysym(XKB_KEY_aogonek, true), "AltGr press");
+    check(input.keyboardKeysym(XKB_KEY_aogonek, true), "AltGr repeat");
+    check(input.keyboardKeysym(XKB_KEY_eogonek, true), "overlapping AltGr press");
+    check(input.keyboardKeysym(XKB_KEY_Aogonek, true), "Shift plus AltGr press");
+    sync();
+    {
+      std::lock_guard lock(capture.mutex);
+      check(capture.symbols.back() == XKB_KEY_Aogonek, "Shift plus AltGr selects Aogonek");
+    }
+    check(input.keyboardKeysym(XKB_KEY_Aogonek, false), "Shift plus AltGr release");
+    check(input.keyboardKeysym(XKB_KEY_aogonek, false), "first AltGr release");
+    sync();
+    {
+      std::lock_guard lock(capture.mutex);
+      check(capture.mods.back() != 0, "remaining AltGr hold retains its modifier");
+    }
+    check(input.keyboardKeysym(XKB_KEY_eogonek, false), "last AltGr release");
+    released();
+    {
+      hkcf::InputState state(input);
+      int owner;
+      check(state.keyboardKeycode(&owner, KEY_LEFTSHIFT, true), "Shift held before replacement");
+      const auto attempts = keymapWriteAttempts;
+      check(!state.keyboardKeysym(&owner, XKB_KEY_Greek_alpha, true), "held Shift refuses dynamic symbol");
+      check(keymapWriteAttempts == attempts, "held Shift refusal does not attempt upload");
+      state.releaseOwner(&owner);
+      released();
+
+      // A long session must not accumulate history that prevents replacement.
+      for (int i = 0; i < 1000; ++i) {
+        check(input.keyboardKeysym('a', true), "long session press");
+        check(input.keyboardKeysym('a', false), "long session release");
+        // Let the server drain the socket so flush never sees EAGAIN.
+        if (i % 64 == 0)
+          sync();
+      }
+      check(input.keyboardKeycode(KEY_CAPSLOCK, true), "lock Caps Lock press");
+      check(input.keyboardKeycode(KEY_CAPSLOCK, false), "lock Caps Lock release");
+      check(state.keyboardKeysym(&owner, XKB_KEY_Greek_alpha, true), "dynamic Unicode press with Caps Lock locked");
+      sync();
+      int maps;
+      {
+        std::lock_guard lock(capture.mutex);
+        maps = capture.maps;
+        check(!capture.mapError && maps == 2, "dynamic keymap compiles and uploads once");
+        // Locked Caps Lock capitalizes the dynamic symbol, as on a real keyboard.
+        check(capture.symbols.back() == XKB_KEY_Greek_ALPHA, "uploaded keymap maps Unicode");
+        check(xkb_state_mod_name_is_active(capture.state, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
+              "replacement preserves locked Caps Lock");
+      }
+      check(state.keyboardKeysym(&owner, XKB_KEY_Greek_alpha, true), "dynamic Unicode repeat");
+      check(state.keyboardKeysym(&owner, XKB_KEY_Greek_alpha, false), "dynamic Unicode release");
+      state.releaseOwner(&owner);
+      check(input.keyboardKeycode(KEY_CAPSLOCK, true), "unlock Caps Lock press");
+      check(input.keyboardKeycode(KEY_CAPSLOCK, false), "unlock Caps Lock release");
+      released();
+      {
+        std::lock_guard lock(capture.mutex);
+        check(!xkb_state_mod_name_is_active(capture.state, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED),
+              "later Caps Lock press and release unlocks after replacement");
+        check(capture.maps == maps, "mapped Unicode repeat and release do not upload");
+      }
+    }
+    {
+      hkcf::InputState state(input);
+      int owner;
+      int maps;
+      std::size_t before;
+      sync();
+      {
+        std::lock_guard lock(capture.mutex);
+        maps = capture.maps;
+        before = capture.keys.size();
+      }
+      const auto attempts = keymapWriteAttempts;
+      failKeymapWrite = true;
+      check(!state.keyboardKeysym(&owner, XKB_KEY_Cyrillic_ya, true), "failed upload rejects owned symbol press");
+      check(state.keyboardKeysym(&owner, XKB_KEY_Cyrillic_ya, false), "failed press leaves no owned symbol to release");
+      state.releaseOwner(&owner);
+      released();
+      for (std::uint32_t code = 1; code <= KEY_MAX; ++code)
+        check(!input.isKeycodePressed(code), "failed upload leaves no key stuck");
+      {
+        std::lock_guard lock(capture.mutex);
+        check(capture.maps == maps && capture.keys.size() == before, "failed upload sends neither map nor keys");
+      }
+      check(keymapWriteAttempts == attempts + 1, "failure attempts exactly one upload");
+      // Presses and releases of mapped/raw keys never retry the failed map.
+      check(input.keyboardKeysym('Z', true), "base symbol works while uploads fail");
+      check(input.keyboardKeysym('Z', false), "base symbol releases while uploads fail");
+      check(input.keyboardKeycode(KEY_B, true), "raw key works while uploads fail");
+      check(input.keyboardKeycode(KEY_B, false), "raw key releases while uploads fail");
+      check(keymapWriteAttempts == attempts + 1, "presses and releases do not retry uploads");
+      failKeymapWrite = false;
+      check(state.keyboardKeysym(&owner, XKB_KEY_Cyrillic_ya, true), "retry rolled back symbol");
+      sync();
+      {
+        std::lock_guard lock(capture.mutex);
+        check(capture.maps == maps + 1, "retry uploads the remapped symbol once");
+        check(capture.symbols.back() == XKB_KEY_Cyrillic_ya, "retry maps the requested symbol");
+      }
+      check(state.keyboardKeysym(&owner, XKB_KEY_Cyrillic_ya, true), "retry symbol repeat");
+      check(state.keyboardKeysym(&owner, XKB_KEY_Cyrillic_ya, false), "retry symbol release");
+      state.releaseOwner(&owner);
+      check(keymapWriteAttempts == attempts + 2, "retry maps once with no repeat/release upload");
+      released();
+
+      failKeymapWrite = true;
+      check(!input.keyboardKeysym(XKB_KEY_Greek_beta, true), "failed upload rejects direct symbol press");
+      check(input.keyboardKeysym(XKB_KEY_Greek_beta, false), "failed direct press leaves no hold");
+      failKeymapWrite = false;
+      check(input.keyboardKeysym(XKB_KEY_Greek_beta, true), "retry direct symbol after rollback");
+      check(input.keyboardKeysym(XKB_KEY_Greek_beta, false), "release retried direct symbol");
+      released();
+      for (std::uint32_t code = 1; code <= KEY_MAX; ++code)
+        check(!input.isKeycodePressed(code), "retry leaves no key stuck");
+    }
     for (bool releaseRawFirst : {false, true}) {
       hkcf::InputState state(input);
       int rawOwner, symbolOwner;
@@ -232,6 +384,7 @@ int main(int argc, char **argv) {
   wl_event_source_remove(stopSource);
   wl_display_destroy_clients(server);
   wl_display_destroy(server);
+  if (capture.state) xkb_state_unref(capture.state);
   close(control[0]);
   close(control[1]);
   return result;

@@ -196,36 +196,18 @@ bool WaylandInput::createDevices() {
 }
 
 bool WaylandInput::sendKeyboardKeymap() {
-    xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    if (!context) {
-        setError(QStringLiteral("failed to create xkb context"));
-        return false;
-    }
-
-    xkb_keymap* keymap = xkb_keymap_new_from_names(context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
-    if (!keymap) {
-        xkb_context_unref(context);
-        setError(QStringLiteral("failed to create xkb keymap"));
-        return false;
-    }
-
-    if (m_xkbState)
-        xkb_state_unref(m_xkbState);
-    m_xkbState = xkb_state_new(keymap);
-
-    char* keymapText = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
-    xkb_keymap_unref(keymap);
-    xkb_context_unref(context);
-
-    if (!keymapText) {
+    const auto keymapText = m_keyResolver.keymapText();
+    if (keymapText.empty()) {
         setError(QStringLiteral("failed to serialize xkb keymap"));
         return false;
     }
-
-    const std::size_t size = std::strlen(keymapText) + 1;
+    auto* state = m_keyResolver.createState(m_xkbState);
+    if (!state)
+        return false;
+    const std::size_t size = keymapText.size() + 1;
     const auto fd = createMemfd("hypr-kdeconnect-keymap");
     if (!fd) {
-        free(keymapText);
+        xkb_state_unref(state);
         setError(QStringLiteral("failed to create keymap fd"));
         return false;
     }
@@ -234,21 +216,35 @@ bool WaylandInput::sendKeyboardKeymap() {
     if (ftruncate(*fd, static_cast<off_t>(size)) != 0)
         ok = false;
     else
-        ok = writeAll(*fd, keymapText, size);
-
-    free(keymapText);
+        ok = writeAll(*fd, keymapText.c_str(), size);
 
     if (!ok) {
         const QString error = QStringLiteral("failed to write keymap fd: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
         close(*fd);
+        xkb_state_unref(state);
         setError(error);
         return false;
     }
 
     zwp_virtual_keyboard_v1_keymap(m_keyboard, kKeyboardKeymapFormatXkbV1, *fd, static_cast<std::uint32_t>(size));
-    ok = flush();
+    const auto depressed = xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED);
+    const auto latched = xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED);
+    const auto locked = xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED);
+    const auto group = xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE);
+    zwp_virtual_keyboard_v1_modifiers(m_keyboard, depressed, latched, locked, group);
+    // The requests are queued (libwayland duplicated the fd), so the compositor
+    // will receive this keymap even if flush() reports backpressure now. Adopt
+    // it unconditionally: rolling back here would desynchronize the slot map.
+    flush();
     close(*fd);
-    return ok;
+    if (m_xkbState)
+        xkb_state_unref(m_xkbState);
+    m_xkbState = state;
+    m_lastDepressed = depressed;
+    m_lastLatched = latched;
+    m_lastLocked = locked;
+    m_lastGroup = group;
+    return true;
 }
 
 bool WaylandInput::pointerMotion(double dx, double dy) {
@@ -356,13 +352,18 @@ bool WaylandInput::keyboardKeycode(std::uint32_t keycode, bool pressed, bool rep
     if (!ensureReady())
         return false;
 
+    const bool wasHeld = m_pressedKeycodes.contains(keycode);
+    if (pressed)
+        m_pressedKeycodes.insert(keycode);
+    else
+        m_pressedKeycodes.erase(keycode);
     zwp_virtual_keyboard_v1_key(m_keyboard, timeMs(), keycode, pressed ? kKeyboardKeyPressed : kKeyboardKeyReleased);
     bool ok = flush();
     if (!ok)
         return false;
 
     // A repeat has no new logical hold; xkbcommon counts modifier presses.
-    if (!repeated)
+    if (!repeated && wasHeld != pressed)
         updateModifiers(keycode, pressed);
     return true;
 }
@@ -390,36 +391,58 @@ void WaylandInput::updateModifiers(std::uint32_t keycode, bool pressed) {
     flush();
 }
 
+std::optional<ResolvedKey> WaylandInput::resolveKeysym(std::uint32_t keysym) {
+    if (!ensureReady())
+        return std::nullopt;
+    const auto revision = m_keyResolver.revision();
+    auto resolved = m_keyResolver.resolveOrExtend(keysym, m_pressedKeycodes, m_xkbState);
+    if (m_keyResolver.revision() != revision && !sendKeyboardKeymap()) {
+        m_keyResolver.rollback();
+        return std::nullopt;
+    }
+    return resolved;
+}
+
 bool WaylandInput::keyboardKeysym(std::uint32_t keysym, bool pressed) {
     if (!security::isAllowedKeysym(keysym)) {
         setError(QStringLiteral("invalid keyboard keysym"));
         return false;
     }
-    const auto resolved = m_keyResolver.resolveKeysym(static_cast<xkb_keysym_t>(keysym));
-    if (!resolved) {
-        qWarning() << "failed to resolve keysym" << keysym;
-        return false;
-    }
-
-    if (pressed) {
-        const bool shouldPressShift = resolved->needsShift && m_shiftedKeysyms.isEmpty();
-        if (shouldPressShift && !keyboardKeycode(KEY_LEFTSHIFT, true))
-            return false;
-        if (!keyboardKeycode(resolved->evdevKeycode, true)) {
-            if (shouldPressShift)
-                keyboardKeycode(KEY_LEFTSHIFT, false);
-            return false;
-        }
-        if (resolved->needsShift)
-            m_shiftedKeysyms.insert(keysym);
+    auto held = m_heldKeysyms.find(keysym);
+    if (!pressed && held == m_heldKeysyms.end())
         return true;
+    const bool repeated = held != m_heldKeysyms.end();
+    const auto resolved = repeated ? std::optional<ResolvedKey>(*held) : resolveKeysym(keysym);
+    if (!resolved)
+        return false;
+    if (pressed) {
+        if (!ensureReady())
+            return false;
+        if (!repeated) {
+            m_heldKeysyms.insert(keysym, *resolved);
+            ++m_keysymKeyHolds[resolved->evdevKeycode];
+            bool ok = true;
+            for (const auto code : resolved->modifierKeycodes) {
+                if (m_modifierHolds[code]++ == 0)
+                    ok = keyboardKeycode(code, true) && ok;
+            }
+            return keyboardKeycode(resolved->evdevKeycode, true) && ok;
+        }
+        return keyboardKeycode(resolved->evdevKeycode, true, repeated);
     }
-
-    const bool ok = keyboardKeycode(resolved->evdevKeycode, false);
-    bool shiftOk = true;
-    if (m_shiftedKeysyms.remove(keysym) && m_shiftedKeysyms.isEmpty())
-        shiftOk = keyboardKeycode(KEY_LEFTSHIFT, false);
-    return ok && shiftOk;
+    bool ok = true;
+    if (--m_keysymKeyHolds[resolved->evdevKeycode] == 0) {
+        m_keysymKeyHolds.remove(resolved->evdevKeycode);
+        ok = keyboardKeycode(resolved->evdevKeycode, false);
+    }
+    for (auto it = resolved->modifierKeycodes.rbegin(); it != resolved->modifierKeycodes.rend(); ++it) {
+        if (--m_modifierHolds[*it] == 0) {
+            m_modifierHolds.remove(*it);
+            ok = keyboardKeycode(*it, false) && ok;
+        }
+    }
+    m_heldKeysyms.remove(keysym);
+    return ok;
 }
 
 QRect WaylandInput::logicalBounds() const {

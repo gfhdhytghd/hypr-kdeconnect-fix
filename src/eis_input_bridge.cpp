@@ -2,6 +2,7 @@
 
 #include "wayland_input.hpp"
 #include "input_state.hpp"
+#include "security_policy.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -234,14 +235,14 @@ void EisInputBridge::handleEvent(eis_event* event) {
     case EIS_EVENT_SCROLL_STOP:
     case EIS_EVENT_SCROLL_CANCEL:
     case EIS_EVENT_KEYBOARD_KEY:
+    case EIS_EVENT_TEXT_KEYSYM:
+    case EIS_EVENT_TEXT_UTF8:
         handleInputEvent(event);
         break;
     case EIS_EVENT_DEVICE_STOP_EMULATING:
         releaseInput(eis_event_get_device(event));
         break;
     case EIS_EVENT_DEVICE_READY:
-    case EIS_EVENT_TEXT_KEYSYM:
-    case EIS_EVENT_TEXT_UTF8:
     case EIS_EVENT_SYNC:
     case EIS_EVENT_FRAME:
     case EIS_EVENT_DEVICE_START_EMULATING:
@@ -272,8 +273,10 @@ void EisInputBridge::handleClientConnect(eis_client* client) {
     eis_seat* seat = eis_client_new_seat(client, "default");
     if (!seat)
         return;
-    if (context->deviceTypes & 1u)
+    if (context->deviceTypes & 1u) {
         eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);
+        eis_seat_configure_capability(seat, EIS_DEVICE_CAP_TEXT);
+    }
     if (context->deviceTypes & 2u) {
         eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER);
         eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER_ABSOLUTE);
@@ -306,6 +309,8 @@ void EisInputBridge::handleSeatBind(eis_event* event) {
 
     if ((state->deviceTypes & 1u) && eis_event_seat_has_capability(event, EIS_DEVICE_CAP_KEYBOARD) && !state->keyboard)
         state->keyboard = addKeyboard(seat);
+    if ((state->deviceTypes & 1u) && eis_event_seat_has_capability(event, EIS_DEVICE_CAP_TEXT) && !state->text)
+        state->text = addText(seat);
     if ((state->deviceTypes & 2u) && (eis_event_seat_has_capability(event, EIS_DEVICE_CAP_POINTER) || eis_event_seat_has_capability(event, EIS_DEVICE_CAP_BUTTON) ||
          eis_event_seat_has_capability(event, EIS_DEVICE_CAP_SCROLL)) &&
         !state->pointer)
@@ -326,6 +331,10 @@ void EisInputBridge::handleDeviceClosed(eis_device* device) {
         eis_device_unref(state->keyboard);
         state->keyboard = nullptr;
     }
+    if (state->text == device) {
+        eis_device_unref(state->text);
+        state->text = nullptr;
+    }
     if (state->pointer == device) {
         eis_device_unref(state->pointer);
         state->pointer = nullptr;
@@ -339,10 +348,12 @@ void EisInputBridge::handleDeviceClosed(eis_device* device) {
 void EisInputBridge::handleInputEvent(eis_event* event) {
     auto* device = eis_event_get_device(event);
     const auto* state = device ? m_seats.value(eis_device_get_seat(device), nullptr) : nullptr;
-    if (!state || (device != state->keyboard && device != state->pointer && device != state->absolutePointer))
+    if (!state || (device != state->keyboard && device != state->text && device != state->pointer && device != state->absolutePointer))
         return;
-    const bool keyboardEvent = eis_event_get_type(event) == EIS_EVENT_KEYBOARD_KEY;
-    if (keyboardEvent ? (!(state->deviceTypes & 1u) || device != state->keyboard)
+    const auto type = eis_event_get_type(event);
+    const bool textEvent = type == EIS_EVENT_TEXT_KEYSYM || type == EIS_EVENT_TEXT_UTF8;
+    const bool keyboardEvent = type == EIS_EVENT_KEYBOARD_KEY || textEvent;
+    if (keyboardEvent ? (!(state->deviceTypes & 1u) || device != (textEvent ? state->text : state->keyboard))
                       : (!(state->deviceTypes & 2u) || (device != state->pointer && device != state->absolutePointer)))
         return;
     switch (eis_event_get_type(event)) {
@@ -395,6 +406,20 @@ void EisInputBridge::handleInputEvent(eis_event* event) {
             m_scrollRemainders.erase(it);
         break;
     }
+    case EIS_EVENT_TEXT_KEYSYM:
+        m_inputs.keyboardKeysym(device, eis_event_text_get_keysym(event), eis_event_text_get_keysym_is_press(event));
+        break;
+    case EIS_EVENT_TEXT_UTF8: {
+        const auto decoded = security::decodeTextUtf8(eis_event_text_get_utf8(event));
+        if (!decoded)
+            break;
+        for (const auto point : decoded->toUcs4()) {
+            const auto symbol = xkb_utf32_to_keysym(point);
+            if (symbol != XKB_KEY_NoSymbol)
+                m_inputs.keyboardText(symbol);
+        }
+        break;
+    }
     case EIS_EVENT_KEYBOARD_KEY:
         m_inputs.keyboardKeycode(device, eis_event_keyboard_get_key(event), eis_event_keyboard_get_key_is_press(event));
         break;
@@ -428,6 +453,18 @@ eis_device* EisInputBridge::addKeyboard(eis_seat* seat) {
     eis_keymap_add(keymap);
     eis_keymap_unref(keymap);
 
+    eis_device_add(device);
+    eis_device_resume(device);
+    return device;
+}
+
+eis_device* EisInputBridge::addText(eis_seat* seat) {
+    eis_device* device = eis_seat_new_device(seat);
+    if (!device)
+        return nullptr;
+    eis_device_configure_type(device, EIS_DEVICE_TYPE_VIRTUAL);
+    eis_device_configure_name(device, "hypr-kdeconnect text");
+    eis_device_configure_capability(device, EIS_DEVICE_CAP_TEXT);
     eis_device_add(device);
     eis_device_resume(device);
     return device;
@@ -485,6 +522,10 @@ void EisInputBridge::removeSeat(eis_seat* seat) {
     if (state->keyboard) {
         releaseInput(state->keyboard);
         eis_device_unref(state->keyboard);
+    }
+    if (state->text) {
+        releaseInput(state->text);
+        eis_device_unref(state->text);
     }
     if (state->pointer) {
         releaseInput(state->pointer);

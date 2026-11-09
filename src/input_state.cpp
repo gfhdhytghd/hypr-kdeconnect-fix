@@ -49,7 +49,12 @@ bool InputState::keyboardKeycode(const void* owner, std::uint32_t code, bool pre
     const bool repeated = pressed && m_keys.value(owner).contains(code);
     if (!update(m_keys, owner, code, pressed) && !repeated)
         return true;
-    return m_input.keyboardKeycode(code, pressed, repeated);
+    const bool ok = m_input.keyboardKeycode(code, pressed, repeated);
+    // A failure before enqueueing a press must not suppress another owner's
+    // next press. Keep holds for requests that were queued before flush failed.
+    if (!ok && pressed && !repeated && !m_input.isKeycodePressed(code))
+        update(m_keys, owner, code, false);
+    return ok;
 }
 
 bool InputState::pointerButton(const void* owner, std::uint32_t code, bool pressed) {
@@ -71,26 +76,60 @@ bool InputState::keyboardKeysym(const void* owner, std::uint32_t symbol, bool pr
         key = symbols->value(symbol);
     const bool repeated = !key.isNull();
     if (!key) {
-        const auto resolved = m_resolver.resolveKeysym(static_cast<xkb_keysym_t>(symbol));
+        const auto resolved = m_input.resolveKeysym(symbol);
         if (!resolved)
             return false;
         key = QSharedPointer<ResolvedKey>::create(*resolved);
         m_keysyms[owner].insert(symbol, key);
     }
     if (pressed) {
-        // Record holds even if a sink reports failure: a queued Wayland request
-        // may already have been sent and still needs a release during cleanup.
-        if (!repeated && key->needsShift && !keyboardKeycode(key.data(), KEY_LEFTSHIFT, true))
+        const auto cancelPress = [&] {
+            releaseOwner(key.data());
+            auto it = m_keysyms.find(owner);
+            it->remove(symbol);
+            if (it->isEmpty())
+                m_keysyms.erase(it);
             return false;
-        return keyboardKeycode(key.data(), key->evdevKeycode, true);
+        };
+        if (!repeated) {
+            for (const auto code : key->modifierKeycodes) {
+                if (!keyboardKeycode(key.data(), code, true))
+                    return cancelPress();
+            }
+        }
+        if (!keyboardKeycode(key.data(), key->evdevKeycode, true))
+            return repeated ? false : cancelPress();
+        return true;
     }
     const bool ok = keyboardKeycode(key.data(), key->evdevKeycode, false);
-    const bool shiftOk = !key->needsShift || keyboardKeycode(key.data(), KEY_LEFTSHIFT, false);
+    bool modifiersOk = true;
+    for (auto it = key->modifierKeycodes.rbegin(); it != key->modifierKeycodes.rend(); ++it)
+        modifiersOk = keyboardKeycode(key.data(), *it, false) && modifiersOk;
     symbols = m_keysyms.find(owner);
     symbols->remove(symbol);
     if (symbols->isEmpty())
         m_keysyms.erase(symbols);
-    return ok && shiftOk;
+    return ok && modifiersOk;
+}
+
+bool InputState::keyboardText(std::uint32_t symbol) {
+    if (!security::isAllowedKeysym(symbol))
+        return false;
+    const auto key = m_input.resolveKeysym(symbol);
+    if (!key)
+        return false;
+    const bool held = isPressed(m_keys, key->evdevKeycode);
+    int owner;
+    const bool pressed = keyboardKeysym(&owner, symbol, true);
+    // Hyprland drops duplicate presses. Retrigger the shared key while the
+    // symbol's modifiers are applied, without changing its logical XKB hold.
+    bool retriggered = true;
+    if (pressed && held) {
+        const bool released = m_input.keyboardKeycode(key->evdevKeycode, false, true);
+        retriggered = m_input.keyboardKeycode(key->evdevKeycode, true, true) && released;
+    }
+    const bool released = keyboardKeysym(&owner, symbol, false);
+    return pressed && retriggered && released;
 }
 
 void InputState::releaseOwner(const void* owner) {

@@ -37,6 +37,9 @@ void waitFor(Condition condition, Pump pump, const char* message) {
 namespace hkcf {
 WaylandInput::WaylandInput() = default;
 WaylandInput::~WaylandInput() = default;
+std::optional<ResolvedKey> WaylandInput::resolveKeysym(std::uint32_t symbol) {
+    return m_keyResolver.resolveOrExtend(symbol, m_pressedKeycodes, m_xkbState);
+}
 bool WaylandInput::ensureReady() { return true; }
 QString WaylandInput::lastError() const { return {}; }
 QRect WaylandInput::logicalBounds() const { return {0, 0, 1920, 1080}; }
@@ -69,6 +72,7 @@ struct EisClient {
     bool disconnected = false;
     uint32_t capabilities = 0;
     bool seatSeen = false;
+    bool textCapability = false;
 
     explicit EisClient(int fd) {
         check(ei_setup_backend_fd(client, fd) == 0, "EIS fd setup");
@@ -86,6 +90,7 @@ struct EisClient {
             switch (ei_event_get_type(event)) {
             case EI_EVENT_SEAT_ADDED:
                 seatSeen = true;
+                textCapability = ei_seat_has_capability(ei_event_get_seat(event), EI_DEVICE_CAP_TEXT);
                 if (ei_seat_has_capability(ei_event_get_seat(event), EI_DEVICE_CAP_KEYBOARD)) capabilities |= 1;
                 for (auto cap : {EI_DEVICE_CAP_POINTER, EI_DEVICE_CAP_POINTER_ABSOLUTE, EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_SCROLL})
                     if (ei_seat_has_capability(ei_event_get_seat(event), cap)) capabilities |= 2;
@@ -299,6 +304,7 @@ void testDeviceGrants(Portal& portal) {
         EisClient client(portal.connectEis(path));
         client.discover(types);
         check(client.capabilities == types, "EIS only announces granted capabilities");
+        check(client.textCapability == bool(types & 1), "text seat capability follows keyboard grant");
         check(bool(client.keyboard) == bool(types & 1) && bool(client.pointer) == bool(types & 2),
               "ungranted devices are not created even when requested");
         const auto before = inputEvents;

@@ -194,6 +194,7 @@ if(BUILD_TESTING)
   )
   hkcf_apply_target_defaults(deskflow-input-test)
   add_test(NAME deskflow-input-test COMMAND deskflow-input-test)
+  add_test(NAME input-state-test COMMAND deskflow-input-test --state-only)
 
   add_executable(eis-repeat-test tests/eis_repeat_test.cpp)
   target_link_libraries(eis-repeat-test PRIVATE Qt6::Core hkcf-libeis hkcf-libei)
@@ -221,6 +222,7 @@ if(BUILD_TESTING)
   target_include_directories(wayland-keysym-test PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/protocols)
   target_link_libraries(wayland-keysym-test PRIVATE Qt6::Core PkgConfig::WAYLAND_CLIENT
     PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON Threads::Threads)
+  target_link_options(wayland-keysym-test PRIVATE LINKER:--wrap=ftruncate)
   hkcf_apply_target_defaults(wayland-keysym-test)
   add_test(NAME wayland-keysym-test
     COMMAND ${CMAKE_COMMAND} -E env --unset=WAYLAND_DISPLAY --unset=WAYLAND_SOCKET --unset=DISPLAY

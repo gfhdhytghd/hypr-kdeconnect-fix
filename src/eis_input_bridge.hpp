@@ -42,6 +42,7 @@ class EisInputBridge : public QObject {
         eis_client* client = nullptr;
         std::uint32_t deviceTypes = 0;
         eis_device* keyboard = nullptr;
+        eis_device* text = nullptr;
         eis_device* pointer = nullptr;
         eis_device* absolutePointer = nullptr;
     };
@@ -55,6 +56,7 @@ class EisInputBridge : public QObject {
     void handleInputEvent(eis_event* event);
     void releaseInput(eis_device* device);
     eis_device* addKeyboard(eis_seat* seat);
+    eis_device* addText(eis_seat* seat);
     eis_device* addPointer(eis_seat* seat);
     eis_device* addAbsolutePointer(eis_seat* seat);
     void removeSeat(eis_seat* seat);

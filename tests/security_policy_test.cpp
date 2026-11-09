@@ -1,5 +1,7 @@
 #include "security_policy.hpp"
 
+#include <QList>
+
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -100,6 +102,15 @@ int main() {
                        "a matching pid should not allow an untrusted executable path");
     failures += expect(!hkcf::security::isAllowedFallbackProcess(QStringLiteral("/usr/bin/kdeconnectd"), 0, 0, 0),
                        "missing process ids should not be allowed");
+
+    const auto text = hkcf::security::decodeTextUtf8("ąę😀");
+    failures += expect(text && text->toUcs4() == QList<uint>{0x105, 0x119, 0x1f600}, "decode BMP and supplementary Unicode code points");
+    failures += expect(!hkcf::security::decodeTextUtf8(nullptr), "reject missing UTF-8 text");
+    for (const auto* invalid : {"a\xc0\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\xe2\x82", "\x80"})
+        failures += expect(!hkcf::security::decodeTextUtf8(invalid), "reject malformed, overlong, surrogate and incomplete UTF-8");
+    const std::string bounded(hkcf::security::kMaxTextUtf8Bytes, 'a');
+    failures += expect(hkcf::security::decodeTextUtf8(bounded.c_str()).has_value(), "accept text at the byte limit");
+    failures += expect(!hkcf::security::decodeTextUtf8((bounded + "a").c_str()), "reject text beyond the byte limit");
 
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

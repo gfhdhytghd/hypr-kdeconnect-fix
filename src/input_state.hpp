@@ -21,6 +21,7 @@ class InputState {
 
     bool keyboardKeycode(const void* owner, std::uint32_t code, bool pressed);
     bool keyboardKeysym(const void* owner, std::uint32_t symbol, bool pressed);
+    bool keyboardText(std::uint32_t symbol);
     bool pointerButton(const void* owner, std::uint32_t code, bool pressed);
     void releaseOwner(const void* owner);
 
@@ -30,7 +31,6 @@ class InputState {
     static bool update(PressedInputs& inputs, const void* owner, std::uint32_t code, bool pressed);
 
     WaylandInput& m_input;
-    KeyResolver m_resolver;
     PressedInputs m_keys;
     PressedInputs m_buttons;
     // Stable tokens distinguish a keysym's physical keys from raw keycodes.

@@ -6,7 +6,7 @@
 #include <optional>
 
 #include <QElapsedTimer>
-#include <QSet>
+#include <QHash>
 #include <QRect>
 #include <QString>
 
@@ -37,7 +37,9 @@ class WaylandInput {
     bool pointerAxisDiscrete(std::uint32_t axis, int steps);
     bool keyboardKeycode(std::uint32_t keycode, bool pressed, bool repeated = false);
     bool keyboardKeysym(std::uint32_t keysym, bool pressed);
+    [[nodiscard]] bool isKeycodePressed(std::uint32_t keycode) const { return m_pressedKeycodes.contains(keycode); }
     [[nodiscard]] QRect logicalBounds() const;
+    [[nodiscard]] std::optional<ResolvedKey> resolveKeysym(std::uint32_t keysym);
 
     static void handleGlobal(void* data, wl_registry* registry, std::uint32_t name, const char* interface, std::uint32_t version);
     static void handleGlobalRemove(void* data, wl_registry* registry, std::uint32_t name);
@@ -90,7 +92,10 @@ class WaylandInput {
     QElapsedTimer m_timer;
     QString m_lastError;
     KeyResolver m_keyResolver;
-    QSet<std::uint32_t> m_shiftedKeysyms;
+    QHash<std::uint32_t, ResolvedKey> m_heldKeysyms;
+    QHash<std::uint32_t, int> m_modifierHolds;
+    QHash<std::uint32_t, int> m_keysymKeyHolds;
+    std::set<std::uint32_t> m_pressedKeycodes;
     xkb_state* m_xkbState = nullptr;
     std::uint32_t m_lastDepressed = ~0u;
     std::uint32_t m_lastLatched = ~0u;
