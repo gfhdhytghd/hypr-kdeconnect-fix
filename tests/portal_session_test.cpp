@@ -14,6 +14,9 @@
 #include <poll.h>
 #include <iostream>
 #include <stdexcept>
+#include <cstring>
+#include <cstdlib>
+#include <xkbcommon/xkbcommon.h>
 
 namespace {
 QSet<uint32_t> keys, buttons;
@@ -73,6 +76,7 @@ struct EisClient {
     uint32_t capabilities = 0;
     bool seatSeen = false;
     bool textCapability = false;
+    std::string keymapText;
 
     explicit EisClient(int fd) {
         check(ei_setup_backend_fd(client, fd) == 0, "EIS fd setup");
@@ -88,6 +92,15 @@ struct EisClient {
         while (auto* event = ei_get_event(client)) {
             auto* device = ei_event_get_device(event);
             switch (ei_event_get_type(event)) {
+            case EI_EVENT_DEVICE_ADDED:
+                if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD)) {
+                    auto* map = ei_device_keyboard_get_keymap(device);
+                    check(map && ei_keymap_get_type(map) == EI_KEYMAP_TYPE_XKB, "portal keyboard map");
+                    keymapText.resize(ei_keymap_get_size(map));
+                    check(pread(ei_keymap_get_fd(map), keymapText.data(), keymapText.size(), 0) ==
+                          static_cast<ssize_t>(keymapText.size()), "read portal keyboard map");
+                }
+                break;
             case EI_EVENT_SEAT_ADDED:
                 seatSeen = true;
                 textCapability = ei_seat_has_capability(ei_event_get_seat(event), EI_DEVICE_CAP_TEXT);
@@ -151,13 +164,12 @@ struct Portal {
         check(reply.type() != QDBusMessage::ErrorMessage, qPrintable(reply.errorMessage()));
         check(!reply.arguments().isEmpty() && reply.arguments().first().toUInt() == 0, "portal success");
     }
-    QString create(uint32_t types = 3) {
+    QString create(uint32_t types = 3, const QString& app = QStringLiteral("org.kde.kdeconnect")) {
         QString sender = owner.baseService().mid(1);
         sender.replace('.', '_');
         const QString path = desktop + "/session/" + sender + "/test" + QString::number(++serial);
         const auto request = QVariant::fromValue(QDBusObjectPath(desktop + "/request/" + sender + "/test"));
         const auto session = QVariant::fromValue(QDBusObjectPath(path));
-        const auto app = QStringLiteral("org.kde.kdeconnect");
         success(call(desktop, remote, "CreateSession", {request, session, app, QVariantMap{}}));
         success(call(desktop, remote, "SelectDevices", {request, session, app, QVariantMap{{"types", types}}}));
         success(call(desktop, remote, "Start", {request, session, app, QString(), QVariantMap{}}));
@@ -168,9 +180,9 @@ struct Portal {
         args.append(values);
         return call(desktop, remote, method, args);
     }
-    int connectEis(const QString& path) {
+    int connectEis(const QString& path, const QString& app = QStringLiteral("org.kde.kdeconnect")) {
         const auto reply = call(desktop, remote, "ConnectToEIS",
-            {QVariant::fromValue(QDBusObjectPath(path)), QString("org.kde.kdeconnect"), QVariantMap{}});
+            {QVariant::fromValue(QDBusObjectPath(path)), app, QVariantMap{}});
         check(reply.type() != QDBusMessage::ErrorMessage, "ConnectToEIS");
         const auto fd = qvariant_cast<QDBusUnixFileDescriptor>(reply.arguments().first());
         check(fd.isValid(), "valid EIS fd");
@@ -180,6 +192,34 @@ struct Portal {
         check(call(path, "org.freedesktop.impl.portal.Session", "Close").type() != QDBusMessage::ErrorMessage, "Session.Close");
     }
 };
+
+void testKeymapSelection(Portal& portal) {
+    auto* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    auto* base = xkb_keymap_new_from_names(context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    check(base, "reference real-layout keymap");
+    char* original = xkb_keymap_get_as_string(base, XKB_KEYMAP_FORMAT_TEXT_V1);
+    check(original, "serialized real-layout keymap");
+    for (const auto& app : {QStringLiteral("org.kde.kdeconnect"), QStringLiteral("org.deskflow.deskflow")}) {
+        const auto path = portal.create(1, app);
+        EisClient client(portal.connectEis(path, app));
+        client.discover(1);
+        if (app == QStringLiteral("org.deskflow.deskflow")) {
+            check(client.keymapText == std::string(original, strlen(original) + 1), "Deskflow portal app receives unchanged map");
+        } else {
+            auto* lookup = xkb_keymap_new_from_string(context, client.keymapText.c_str(), XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+            check(lookup, "KDE portal lookup map compiles");
+            const xkb_keysym_t* syms;
+            check(xkb_keymap_num_levels_for_key(lookup, KEY_A + 8, 0) == 1 &&
+                  xkb_keymap_key_get_syms_by_level(lookup, KEY_A + 8, 0, 0, &syms) == 1 && syms[0] == 'a',
+                  "KDE portal app receives single-level base keys");
+            xkb_keymap_unref(lookup);
+        }
+        portal.close(path);
+    }
+    free(original);
+    xkb_keymap_unref(base);
+    xkb_context_unref(context);
+}
 
 void testRevocation(Portal& portal) {
     // One session's revocation must leave another session operational.
@@ -358,6 +398,7 @@ int main(int argc, char** argv) {
     try {
         check(qEnvironmentVariableIsSet("DBUS_SESSION_BUS_ADDRESS"), "run on a private dbus-run-session bus");
         Portal portal;
+        testKeymapSelection(portal);
         testRevocation(portal);
         testNotifyOwnership(portal);
         testRateLimitReleases(portal);

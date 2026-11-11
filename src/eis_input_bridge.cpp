@@ -3,6 +3,7 @@
 #include "wayland_input.hpp"
 #include "input_state.hpp"
 #include "security_policy.hpp"
+#include "lookup_keymap.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -12,6 +13,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <utility>
 
 #include <QDebug>
 #include <QRect>
@@ -65,26 +67,24 @@ bool writeAll(int fd, const char* data, std::size_t size) {
     return true;
 }
 
-std::optional<KeymapFd> createKeymapFd(QString* errorText) {
-    xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    if (!context) {
-        if (errorText)
-            *errorText = QStringLiteral("failed to create xkb context");
-        return std::nullopt;
-    }
-
-    xkb_keymap* keymap = xkb_keymap_new_from_names(context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
-    if (!keymap) {
+std::optional<KeymapFd> createKeymapFd(QString* errorText, const LookupKeymap* lookup) {
+    char* keymapText = nullptr;
+    if (lookup) {
+        keymapText = strdup(lookup->text.c_str());
+    } else {
+        xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+        if (!context) {
+            if (errorText)
+                *errorText = QStringLiteral("failed to create xkb context");
+            return std::nullopt;
+        }
+        xkb_keymap* keymap = xkb_keymap_new_from_names(context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
+        if (keymap) {
+            keymapText = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+            xkb_keymap_unref(keymap);
+        }
         xkb_context_unref(context);
-        if (errorText)
-            *errorText = QStringLiteral("failed to create xkb keymap");
-        return std::nullopt;
     }
-
-    char* keymapText = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
-    xkb_keymap_unref(keymap);
-    xkb_context_unref(context);
-
     if (!keymapText) {
         if (errorText)
             *errorText = QStringLiteral("failed to serialize xkb keymap");
@@ -139,17 +139,43 @@ int wheelStep(double delta) {
 
 } // namespace
 
-EisInputBridge::EisInputBridge(WaylandInput& input, InputState& inputs, QObject* parent)
+EisInputBridge::EisInputBridge(WaylandInput& input, InputState& inputs, QObject* parent, Clock clock)
     : QObject(parent)
     , m_input(input)
-    , m_inputs(inputs) {
+    , m_inputs(inputs)
+    , m_clock(std::move(clock)) {
+    m_rateTimer.start();
+    // Generate once at startup, independently of any display connection.
+    if (auto* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS)) {
+        if (auto* base = xkb_keymap_new_from_names(context, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS)) {
+            m_lookupKeymap = makeLookupKeymap(base);
+            xkb_keymap_unref(base);
+        }
+        xkb_context_unref(context);
+    }
+    if (m_lookupKeymap) {
+        const auto& map = *m_lookupKeymap;
+        qInfo().noquote() << QStringLiteral("EIS lookup keymap: %1 extra symbols, %2 bytes; first omitted code point: %3")
+            .arg(map.symbols.size()).arg(map.text.size() + 1)
+            .arg(map.firstOmittedKeysym
+                     ? (map.firstOmittedCodepoint
+                            ? QStringLiteral("U+%1").arg(map.firstOmittedCodepoint, 4, 16, QLatin1Char('0'))
+                            : QStringLiteral("none (non-text keysym 0x%1)").arg(*map.firstOmittedKeysym, 0, 16))
+                     : QStringLiteral("none"));
+    } else {
+        qWarning() << "failed to create bounded EIS lookup keymap";
+    }
 }
 
 EisInputBridge::~EisInputBridge() {
     cleanup();
 }
 
-std::optional<int> EisInputBridge::addClient(const QString& sessionId, std::uint32_t deviceTypes, QString* errorText) {
+qint64 EisInputBridge::nowMs() const {
+    return m_clock ? m_clock() : m_rateTimer.elapsed();
+}
+
+std::optional<int> EisInputBridge::addClient(const QString& sessionId, std::uint32_t deviceTypes, QString* errorText, bool lookupKeyboard) {
     if (m_clients.contains(sessionId)) {
         if (errorText)
             *errorText = QStringLiteral("EIS client already exists for session");
@@ -180,7 +206,7 @@ std::optional<int> EisInputBridge::addClient(const QString& sessionId, std::uint
     connect(notifier, &QSocketNotifier::activated, this, [this, context]() {
         dispatch(context);
     });
-    m_clients.insert(sessionId, {context, deviceTypes, notifier});
+    m_clients.insert(sessionId, {context, deviceTypes, notifier, lookupKeyboard});
     return fd;
 }
 
@@ -287,6 +313,8 @@ void EisInputBridge::handleClientConnect(eis_client* client) {
     auto* state = new SeatState;
     state->client = client;
     state->deviceTypes = context->deviceTypes;
+    state->lookupKeyboard = context->lookupKeyboard;
+    state->lookupRateWindowStartMs = nowMs();
     m_seats.insert(seat, state);
     eis_seat_add(seat);
 }
@@ -347,7 +375,7 @@ void EisInputBridge::handleDeviceClosed(eis_device* device) {
 
 void EisInputBridge::handleInputEvent(eis_event* event) {
     auto* device = eis_event_get_device(event);
-    const auto* state = device ? m_seats.value(eis_device_get_seat(device), nullptr) : nullptr;
+    auto* state = device ? m_seats.value(eis_device_get_seat(device), nullptr) : nullptr;
     if (!state || (device != state->keyboard && device != state->text && device != state->pointer && device != state->absolutePointer))
         return;
     const auto type = eis_event_get_type(event);
@@ -420,9 +448,30 @@ void EisInputBridge::handleInputEvent(eis_event* event) {
         }
         break;
     }
-    case EIS_EVENT_KEYBOARD_KEY:
-        m_inputs.keyboardKeycode(device, eis_event_keyboard_get_key(event), eis_event_keyboard_get_key_is_press(event));
+    case EIS_EVENT_KEYBOARD_KEY: {
+        const auto code = eis_event_keyboard_get_key(event);
+        const bool pressed = eis_event_keyboard_get_key_is_press(event);
+        const auto symbol = state->lookupSymbols.constFind(code);
+        if (symbol != state->lookupSymbols.cend()) {
+            // Releases bypass the press budget so exhaustion cannot stick keys.
+            if (pressed) {
+                const auto now = nowMs();
+                if (now - state->lookupRateWindowStartMs >= security::kNotifyRateWindowMs) {
+                    state->lookupRateWindowStartMs = now;
+                    state->lookupPresses = 0;
+                }
+                if (state->lookupPresses >= security::kMaxNotifyEventsPerWindow)
+                    break;
+                ++state->lookupPresses;
+            }
+            m_inputs.keyboardKeysym(device, *symbol, pressed);
+        } else if (!state->lookupKeyboard || (m_lookupKeymap && m_lookupKeymap->rawKeycodes.contains(code))) {
+            // Character base keys and KDE's reserved special/modifier keys
+            // retain the raw path, including unadvertised non-text keys.
+            m_inputs.keyboardKeycode(device, code, pressed);
+        }
         break;
+    }
     default:
         break;
     }
@@ -437,7 +486,12 @@ eis_device* EisInputBridge::addKeyboard(eis_seat* seat) {
     eis_device_configure_capability(device, EIS_DEVICE_CAP_KEYBOARD);
 
     QString errorText;
-    const auto fd = createKeymapFd(&errorText);
+    auto* state = m_seats.value(seat);
+    if (state->lookupKeyboard && !m_lookupKeymap) {
+        eis_device_unref(device);
+        return nullptr;
+    }
+    const auto fd = createKeymapFd(&errorText, state->lookupKeyboard ? &*m_lookupKeymap : nullptr);
     if (!fd) {
         qWarning() << "failed to create EIS keyboard keymap:" << errorText;
         eis_device_unref(device);
@@ -452,6 +506,7 @@ eis_device* EisInputBridge::addKeyboard(eis_seat* seat) {
     }
     eis_keymap_add(keymap);
     eis_keymap_unref(keymap);
+    state->lookupSymbols = state->lookupKeyboard ? m_lookupKeymap->symbols : QHash<std::uint32_t, std::uint32_t>{};
 
     eis_device_add(device);
     eis_device_resume(device);

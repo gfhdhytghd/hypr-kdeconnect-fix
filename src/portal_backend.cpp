@@ -468,7 +468,13 @@ bool PortalBackend::handleRemoteDesktop(const QDBusMessage& message, const QDBus
             return true;
 
         QString eisError;
-        const auto fd = m_eis.addClient(sessionHandle->path(), session->requestedTypes, &eisError);
+        QString verifiedExecutable;
+        if (security::needsKdeConnectCallerFallback(session->appId)) {
+            if (const auto sender = security::senderBusNameFromSessionPath(sessionHandle->path()))
+                verifiedExecutable = verifiedKdeConnectExecutablePath(connection, *sender);
+        }
+        const bool lookupKeyboard = security::usesLookupKeyboard(session->appId, verifiedExecutable);
+        const auto fd = m_eis.addClient(sessionHandle->path(), session->requestedTypes, &eisError, lookupKeyboard);
         if (!fd) {
             connection.send(error(message, QDBusError::Failed, eisError));
             return true;

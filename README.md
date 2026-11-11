@@ -39,6 +39,17 @@ KDE Connect 26.04+ prefers `ConnectToEIS` on Wayland. This bridge accepts that
 path and translates incoming libei pointer, scroll, and keyboard events into the
 same virtual-input backend used by the RemoteDesktop `Notify*` methods.
 
+KDE Connect 26.04 and 26.08 type text by looking each character up in the
+keymap of the EIS keyboard and sending only the keycode they find, without
+modifiers. For KDE Connect sessions the bridge therefore advertises a lookup
+keymap in which uppercase letters, AltGr symbols, Latin-1, Latin Extended-A,
+common punctuation, Greek, Cyrillic, currency signs and part of Latin
+Extended-B each sit on their own key, and turns those keys back into the right
+characters. libei limits keyboards to 768 keycodes, so characters outside that
+set (for example CJK or emoji) still cannot be typed from these KDE Connect
+versions. Newer KDE Connect sends text through the EIS text device instead and
+is not affected. Deskflow keeps receiving the normal layout keymap.
+
 Deskflow can use this backend to receive keyboard and pointer input on
 Hyprland, including Omarchy installations whose existing portal backend does
 not expose RemoteDesktop. See [Deskflow setup](docs/deskflow.md).

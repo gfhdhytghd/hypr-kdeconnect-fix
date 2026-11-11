@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +30,17 @@ constexpr int kKeymapReplacementsPerSecond = 30;
 // One full slot cache per burst, so a pasted text with many new symbols is not truncated.
 constexpr int kKeymapReplacementBurst = 64;
 constexpr std::int64_t kKeymapWarningIntervalMs = 1000;
+
+// KDE Connect release/26.04 and release/26.08, mousepad/waylandremoteinput.cpp
+// SpecialKeysMap (excluding its invalid zero entry), then the other modifiers.
+// These codes must never become lookup slots, even when absent from the map.
+inline constexpr std::array kKdeConnectRawKeycodes = {
+    KEY_BACKSPACE, KEY_TAB, KEY_LINEFEED, KEY_LEFT, KEY_UP, KEY_RIGHT, KEY_DOWN,
+    KEY_PAGEUP, KEY_PAGEDOWN, KEY_HOME, KEY_END, KEY_ENTER, KEY_DELETE, KEY_ESC,
+    KEY_SYSRQ, KEY_SCROLLLOCK, KEY_LEFTCTRL, KEY_LEFTALT, KEY_LEFTSHIFT, KEY_LEFTMETA,
+    KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
+    KEY_RIGHTCTRL, KEY_RIGHTALT, KEY_RIGHTSHIFT, KEY_RIGHTMETA, KEY_CAPSLOCK, KEY_NUMLOCK, KEY_COMPOSE, KEY_FN,
+};
 
 // Reject the complete event before injecting any input, including incomplete
 // trailing sequences. A text event is not a streaming UTF-8 fragment.
@@ -63,6 +75,18 @@ inline bool isAllowedAppId(const QString& appId) {
 inline bool needsKdeConnectCallerFallback(const QString& appId) {
     const QString normalized = normalizedAppId(appId);
     return normalized.isEmpty() || normalized == QStringLiteral("surface-transient");
+}
+
+// verifiedExecutable must come from the existing D-Bus PID/owner verification.
+// Never infer keyboard semantics from a sender-controlled libei display name.
+inline bool usesLookupKeyboard(const QString& appId, const QString& verifiedExecutable = {}) {
+    const auto id = normalizedAppId(appId);
+    if (isAllowedAppId(id) && (id == QStringLiteral("org.kde.kdeconnect") || id.startsWith(QStringLiteral("org.kde.kdeconnect."))))
+        return true;
+    return needsKdeConnectCallerFallback(id) &&
+           (verifiedExecutable == QStringLiteral("/usr/bin/kdeconnectd") ||
+            verifiedExecutable == QStringLiteral("/usr/lib/kdeconnectd") ||
+            verifiedExecutable == QStringLiteral("/usr/libexec/kdeconnectd"));
 }
 
 inline bool isPlausibleAppId(const QString& appId) {

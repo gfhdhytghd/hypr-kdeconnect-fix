@@ -127,6 +127,7 @@ endforeach()
 
 add_executable(hypr-kdeconnect-portal
   ${PROTOCOL_SOURCES}
+  src/lookup_keymap.cpp
   src/eis_input_bridge.cpp
   src/input_state.cpp
   src/key_resolver.cpp
@@ -155,6 +156,12 @@ target_compile_definitions(hypr-kdeconnect-portal PRIVATE
 hkcf_apply_target_defaults(hypr-kdeconnect-portal)
 
 if(BUILD_TESTING)
+  add_executable(lookup-keymap-test tests/lookup_keymap_test.cpp src/lookup_keymap.cpp)
+  target_include_directories(lookup-keymap-test PRIVATE src)
+  target_link_libraries(lookup-keymap-test PRIVATE Qt6::Core PkgConfig::XKBCOMMON)
+  hkcf_apply_target_defaults(lookup-keymap-test)
+  add_test(NAME lookup-keymap-test COMMAND lookup-keymap-test)
+
   add_executable(key-resolver-test
     src/key_resolver.cpp
     tests/key_resolver_test.cpp
@@ -180,6 +187,7 @@ if(BUILD_TESTING)
 
   add_executable(deskflow-input-test
     tests/deskflow_input_test.cpp
+    src/lookup_keymap.cpp
     src/eis_input_bridge.cpp
     src/input_state.cpp
     src/key_resolver.cpp
@@ -229,10 +237,27 @@ if(BUILD_TESTING)
       $<TARGET_FILE:wayland-keysym-test>)
   set_tests_properties(wayland-keysym-test PROPERTIES TIMEOUT 15)
 
+  add_executable(kdeconnect-lookup-test
+    tests/kdeconnect_lookup_test.cpp src/eis_input_bridge.cpp src/lookup_keymap.cpp
+    src/wayland_input.cpp src/input_state.cpp src/key_resolver.cpp
+    ${PROTOCOL_SOURCES} ${TEST_SERVER_HEADERS}
+  )
+  target_include_directories(kdeconnect-lookup-test PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/protocols)
+  target_link_libraries(kdeconnect-lookup-test PRIVATE Qt6::Core hkcf-libeis hkcf-libei
+    PkgConfig::WAYLAND_CLIENT PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON Threads::Threads)
+  hkcf_apply_target_defaults(kdeconnect-lookup-test)
+  foreach(layout us pl)
+    add_test(NAME kdeconnect-lookup-${layout}-test
+      COMMAND ${CMAKE_COMMAND} -E env --unset=WAYLAND_DISPLAY --unset=WAYLAND_SOCKET --unset=DISPLAY
+        $<TARGET_FILE:kdeconnect-lookup-test> ${layout})
+    set_tests_properties(kdeconnect-lookup-${layout}-test PROPERTIES TIMEOUT 30)
+  endforeach()
+
   find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
   add_executable(portal-session-test
     tests/portal_session_test.cpp
     src/portal_backend.cpp
+    src/lookup_keymap.cpp
     src/eis_input_bridge.cpp
     src/input_state.cpp
     src/key_resolver.cpp

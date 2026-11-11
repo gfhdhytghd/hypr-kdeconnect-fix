@@ -22,6 +22,13 @@ int expect(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    failures += expect(hkcf::security::usesLookupKeyboard(QStringLiteral("org.kde.kdeconnect.daemon")), "KDE app id selects lookup map");
+    failures += expect(hkcf::security::usesLookupKeyboard({}, QStringLiteral("/usr/bin/kdeconnectd")), "verified native KDE selects lookup map");
+    failures += expect(hkcf::security::usesLookupKeyboard(QStringLiteral("surface-transient"), QStringLiteral("/usr/lib/kdeconnectd")), "verified transient KDE selects lookup map");
+    failures += expect(!hkcf::security::usesLookupKeyboard({}), "unidentified sender retains real map");
+    failures += expect(!hkcf::security::usesLookupKeyboard({}, QStringLiteral("/usr/bin/deskflow-core")), "native Deskflow retains real map");
+    failures += expect(!hkcf::security::usesLookupKeyboard(QStringLiteral("org.deskflow.deskflow")), "Deskflow app id retains real map");
+    failures += expect(!hkcf::security::usesLookupKeyboard(QStringLiteral("org.kde.kdeconnect.evil")), "unknown app id retains real map");
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow")), "Deskflow app id should be accepted");
     failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow.evil")), "Deskflow-like ids should be rejected");
     const QString expected = QStringLiteral("/home/test/.local/bin/deskflow-core");

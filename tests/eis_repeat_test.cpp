@@ -43,6 +43,7 @@ struct DirectConnection {
             switch (eis_event_get_type(event)) {
             case EIS_EVENT_CLIENT_CONNECT: {
                 auto* sender = eis_event_get_client(event);
+                check(eis_client_get_name(sender) == nullptr, "unconfigured libei client has no name (KDE Connect <=26.08)");
                 eis_client_connect(sender);
                 seat = eis_client_new_seat(sender, "repeat-control");
                 eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);

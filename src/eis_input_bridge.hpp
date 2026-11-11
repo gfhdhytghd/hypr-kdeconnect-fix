@@ -1,9 +1,13 @@
 #pragma once
 
+#include "lookup_keymap.hpp"
+
 #include <optional>
+#include <functional>
 
 #include <QObject>
 #include <QHash>
+#include <QElapsedTimer>
 #include <QString>
 
 struct eis;
@@ -21,13 +25,15 @@ class EisInputBridge : public QObject {
     Q_OBJECT
 
   public:
-    explicit EisInputBridge(WaylandInput& input, InputState& inputs, QObject* parent = nullptr);
+    using Clock = std::function<qint64()>;
+    explicit EisInputBridge(WaylandInput& input, InputState& inputs, QObject* parent = nullptr, Clock clock = {});
     ~EisInputBridge() override;
 
     EisInputBridge(const EisInputBridge&) = delete;
     EisInputBridge& operator=(const EisInputBridge&) = delete;
 
-    [[nodiscard]] std::optional<int> addClient(const QString& sessionId, std::uint32_t deviceTypes, QString* errorText = nullptr);
+    [[nodiscard]] std::optional<int> addClient(const QString& sessionId, std::uint32_t deviceTypes, QString* errorText = nullptr,
+                                             bool lookupKeyboard = false);
 
     void removeClient(const QString& sessionId);
 
@@ -36,6 +42,7 @@ class EisInputBridge : public QObject {
         eis* context = nullptr;
         std::uint32_t deviceTypes = 0;
         QObject* notifier = nullptr;
+        bool lookupKeyboard = false;
     };
 
     struct SeatState {
@@ -45,6 +52,10 @@ class EisInputBridge : public QObject {
         eis_device* text = nullptr;
         eis_device* pointer = nullptr;
         eis_device* absolutePointer = nullptr;
+        bool lookupKeyboard = false;
+        QHash<std::uint32_t, std::uint32_t> lookupSymbols;
+        qint64 lookupRateWindowStartMs = 0;
+        int lookupPresses = 0;
     };
 
     void dispatch(eis* context);
@@ -61,12 +72,16 @@ class EisInputBridge : public QObject {
     eis_device* addAbsolutePointer(eis_seat* seat);
     void removeSeat(eis_seat* seat);
     void cleanup();
+    qint64 nowMs() const;
 
     WaylandInput& m_input;
     InputState& m_inputs;
     QHash<QString, ClientContext> m_clients;
     QHash<eis_seat*, SeatState*> m_seats;
     QHash<eis_device*, QPair<int, int>> m_scrollRemainders;
+    std::optional<LookupKeymap> m_lookupKeymap;
+    QElapsedTimer m_rateTimer;
+    Clock m_clock;
 };
 
 } // namespace hkcf
