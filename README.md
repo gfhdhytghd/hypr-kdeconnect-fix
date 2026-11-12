@@ -1,8 +1,8 @@
 # hypr-kdeconnect-fix
 
 A small user-level `xdg-desktop-portal` RemoteDesktop backend that makes KDE
-Connect and Deskflow remote input work on Wayland compositors that expose
-virtual input protocols.
+Connect and Deskflow remote input, plus KeePassXC auto-type, work on Wayland
+compositors that expose virtual input protocols.
 
 KDE Connect already uses `org.freedesktop.portal.RemoteDesktop` for remote
 mouse and keyboard input on Wayland. Some compositor-specific portal backends
@@ -260,9 +260,10 @@ prompt on top of that, so it narrows the D-Bus attack surface instead:
 - RemoteDesktop and Session methods are accepted only from the current
   `org.freedesktop.portal.Desktop` owner.
 - Sessions are bound to that D-Bus sender and capped in number.
-- Accepted app ids are exact KDE Connect desktop ids and
-  `org.deskflow.deskflow`; substring matches are rejected. Native clients with
-  an empty or `surface-transient` app id must pass additional process checks.
+- Accepted app ids are exact KDE Connect desktop ids,
+  `org.deskflow.deskflow`, and `org.keepassxc.KeePassXC`; substring matches are
+  rejected. Native clients with an empty or `surface-transient` app id must pass
+  additional process checks.
   KDE Connect must own its D-Bus name and use a known daemon path. Deskflow's
   originating D-Bus process must match `/usr/bin/deskflow-core` or the exact
   absolute path set by `HKCF_DESKFLOW_EXECUTABLE` at build time; a matching

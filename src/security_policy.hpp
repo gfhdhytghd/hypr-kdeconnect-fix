@@ -67,6 +67,7 @@ inline bool isAllowedAppId(const QString& appId) {
         return false;
 
     return normalized == QStringLiteral("org.deskflow.deskflow") ||
+           normalized == QStringLiteral("org.keepassxc.KeePassXC") ||
            normalized == QStringLiteral("org.kde.kdeconnect") || normalized == QStringLiteral("org.kde.kdeconnect.app") ||
            normalized == QStringLiteral("org.kde.kdeconnect.daemon") || normalized == QStringLiteral("org.kde.kdeconnect.handler") ||
            normalized == QStringLiteral("org.kde.kdeconnect.nonplasma") || normalized == QStringLiteral("org.kde.kdeconnect.sms");
