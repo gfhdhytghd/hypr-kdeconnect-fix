@@ -199,12 +199,12 @@ void testKeymapSelection(Portal& portal) {
     check(base, "reference real-layout keymap");
     char* original = xkb_keymap_get_as_string(base, XKB_KEYMAP_FORMAT_TEXT_V1);
     check(original, "serialized real-layout keymap");
-    for (const auto& app : {QStringLiteral("org.kde.kdeconnect"), QStringLiteral("org.deskflow.deskflow")}) {
+    for (const auto& app : {QStringLiteral("org.kde.kdeconnect"), QStringLiteral("org.deskflow.deskflow"), QStringLiteral("org.keepassxc.KeePassXC")}) {
         const auto path = portal.create(1, app);
         EisClient client(portal.connectEis(path, app));
         client.discover(1);
-        if (app == QStringLiteral("org.deskflow.deskflow")) {
-            check(client.keymapText == std::string(original, strlen(original) + 1), "Deskflow portal app receives unchanged map");
+        if (app != QStringLiteral("org.kde.kdeconnect")) {
+            check(client.keymapText == std::string(original, strlen(original) + 1), "Deskflow/KeePassXC portal app receives unchanged map");
         } else {
             auto* lookup = xkb_keymap_new_from_string(context, client.keymapText.c_str(), XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
             check(lookup, "KDE portal lookup map compiles");

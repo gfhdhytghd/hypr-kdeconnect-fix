@@ -28,9 +28,14 @@ int main() {
     failures += expect(!hkcf::security::usesLookupKeyboard({}), "unidentified sender retains real map");
     failures += expect(!hkcf::security::usesLookupKeyboard({}, QStringLiteral("/usr/bin/deskflow-core")), "native Deskflow retains real map");
     failures += expect(!hkcf::security::usesLookupKeyboard(QStringLiteral("org.deskflow.deskflow")), "Deskflow app id retains real map");
+    failures += expect(!hkcf::security::usesLookupKeyboard(QStringLiteral("org.keepassxc.KeePassXC")), "KeePassXC app id retains real map");
     failures += expect(!hkcf::security::usesLookupKeyboard(QStringLiteral("org.kde.kdeconnect.evil")), "unknown app id retains real map");
     failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow")), "Deskflow app id should be accepted");
     failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.deskflow.deskflow.evil")), "Deskflow-like ids should be rejected");
+    failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("org.keepassxc.KeePassXC")), "KeePassXC app id should be accepted");
+    failures += expect(hkcf::security::isAllowedAppId(QStringLiteral("  org.keepassxc.KeePassXC  ")), "trimmed KeePassXC app id should be accepted");
+    failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.keepassxc.keepassxc")), "lower-case KeePassXC app id should be rejected");
+    failures += expect(!hkcf::security::isAllowedAppId(QStringLiteral("org.keepassxc.KeePassXC.evil")), "KeePassXC-like ids should be rejected");
     const QString expected = QStringLiteral("/home/test/.local/bin/deskflow-core");
     failures += expect(hkcf::security::isDeskflowExecutablePath(expected, expected), "exact configured Deskflow path should pass");
     failures += expect(!hkcf::security::isDeskflowExecutablePath(QStringLiteral("/tmp/deskflow-core"), expected), "different binary path should fail");
