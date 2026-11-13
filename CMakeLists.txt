@@ -254,6 +254,23 @@ if(BUILD_TESTING)
   endforeach()
 
   find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
+  add_executable(alt-drag-test
+    tests/alt_drag_test.cpp src/eis_input_bridge.cpp src/lookup_keymap.cpp
+    src/wayland_input.cpp src/input_state.cpp src/key_resolver.cpp
+    ${PROTOCOL_SOURCES} ${TEST_SERVER_HEADERS}
+  )
+  target_include_directories(alt-drag-test PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/protocols)
+  target_link_libraries(alt-drag-test PRIVATE Qt6::Core hkcf-libeis hkcf-libei
+    PkgConfig::WAYLAND_CLIENT PkgConfig::WAYLAND_SERVER PkgConfig::XKBCOMMON Threads::Threads)
+  target_link_options(alt-drag-test PRIVATE LINKER:--wrap=wl_display_flush)
+  hkcf_apply_target_defaults(alt-drag-test)
+  foreach(scenario normal press-backpressure release-backpressure scoped-packet)
+    add_test(NAME alt-drag-${scenario}-test
+      COMMAND ${CMAKE_COMMAND} -E env --unset=WAYLAND_DISPLAY --unset=WAYLAND_SOCKET --unset=DISPLAY
+        $<TARGET_FILE:alt-drag-test> ${scenario})
+    set_tests_properties(alt-drag-${scenario}-test PROPERTIES TIMEOUT 15)
+  endforeach()
+
   add_executable(portal-session-test
     tests/portal_session_test.cpp
     src/portal_backend.cpp

@@ -358,14 +358,13 @@ bool WaylandInput::keyboardKeycode(std::uint32_t keycode, bool pressed, bool rep
     else
         m_pressedKeycodes.erase(keycode);
     zwp_virtual_keyboard_v1_key(m_keyboard, timeMs(), keycode, pressed ? kKeyboardKeyPressed : kKeyboardKeyReleased);
-    bool ok = flush();
-    if (!ok)
-        return false;
-
+    // Queue the matching XKB state before flushing. The key request remains
+    // queued on EAGAIN; skipping its state update would permanently lose a
+    // modifier press/release before the next pointer request drains the queue.
     // A repeat has no new logical hold; xkbcommon counts modifier presses.
     if (!repeated && wasHeld != pressed)
         updateModifiers(keycode, pressed);
-    return true;
+    return flush();
 }
 
 void WaylandInput::updateModifiers(std::uint32_t keycode, bool pressed) {
@@ -388,7 +387,6 @@ void WaylandInput::updateModifiers(std::uint32_t keycode, bool pressed) {
     m_lastGroup = group;
 
     zwp_virtual_keyboard_v1_modifiers(m_keyboard, depressed, latched, locked, group);
-    flush();
 }
 
 std::optional<ResolvedKey> WaylandInput::resolveKeysym(std::uint32_t keysym) {

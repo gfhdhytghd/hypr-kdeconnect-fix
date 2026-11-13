@@ -23,11 +23,17 @@
 struct Key {
   uint32_t code, state;
 };
+struct PointerSample {
+  bool motion;
+  uint32_t code, state;
+  bool alt;
+};
 struct Capture {
   std::mutex mutex;
   std::vector<Key> keys;
   std::vector<uint32_t> mods;
   std::vector<xkb_keysym_t> symbols;
+  std::vector<PointerSample> pointerSamples;
   xkb_state* state = nullptr;
   int maps = 0;
   bool mapError = false;
@@ -76,7 +82,14 @@ void bindKeyboard(wl_client *c, void *, uint32_t v, uint32_t id) {
       wl_resource_create(c, &zwp_virtual_keyboard_manager_v1_interface, v, id);
   wl_resource_set_implementation(r, &keyboardManagerImpl, nullptr, nullptr);
 }
-void motion(wl_client *, wl_resource *, uint32_t, wl_fixed_t, wl_fixed_t) {}
+bool altActive() {
+  return capture.state && xkb_state_mod_name_is_active(
+      capture.state, XKB_MOD_NAME_ALT, XKB_STATE_MODS_EFFECTIVE) > 0;
+}
+void motion(wl_client *, wl_resource *, uint32_t, wl_fixed_t, wl_fixed_t) {
+  std::lock_guard lock(capture.mutex);
+  capture.pointerSamples.push_back({true, 0, 0, altActive()});
+}
 void absolute(wl_client *, wl_resource *, uint32_t, uint32_t x, uint32_t y,
               uint32_t w, uint32_t h) {
   std::lock_guard lock(capture.mutex);
@@ -85,7 +98,10 @@ void absolute(wl_client *, wl_resource *, uint32_t, uint32_t x, uint32_t y,
   capture.w = w;
   capture.h = h;
 }
-void button(wl_client *, wl_resource *, uint32_t, uint32_t, uint32_t) {}
+void button(wl_client *, wl_resource *, uint32_t, uint32_t code, uint32_t state) {
+  std::lock_guard lock(capture.mutex);
+  capture.pointerSamples.push_back({false, code, state, altActive()});
+}
 void axis(wl_client *, wl_resource *, uint32_t, uint32_t, wl_fixed_t) {}
 void frame(wl_client *, wl_resource *) { ++capture.frames; }
 void source(wl_client *, wl_resource *, uint32_t) {}
