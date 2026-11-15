@@ -14,7 +14,7 @@ events through `zwp_virtual_keyboard_manager_v1` and
 This is a compatibility shim, not a compositor plugin. It was written for
 Hyprland, but the core requirement is protocol support; it can also work on
 wlroots or protocol-compatible compositors such as sway, river, Wayfire, labwc,
-phosh, and niri when their portal routing is configured.
+phosh, niri, and Umbriel when their portal routing is configured.
 
 ## Status
 
@@ -133,15 +133,15 @@ RELRO/BIND_NOW, stack protector, and fortify checks when the compiler supports
 them.
 
 By default, the generated portal metadata is visible when `XDG_CURRENT_DESKTOP`
-is one of `wlroots`, `Hyprland`, `sway`, `Wayfire`, `river`, `phosh`, `niri`, or
-`labwc`. If your compatible compositor uses a different desktop id, set it at
-configure time:
+is one of `wlroots`, `Hyprland`, `sway`, `Wayfire`, `river`, `phosh`, `niri`,
+`labwc`, or `umbriel`. If your compatible compositor uses a different desktop
+id, set it at configure time:
 
 ```sh
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$HOME/.local" \
-  -DHKCF_PORTAL_USE_IN='wlroots;Hyprland;sway;Wayfire;river;phosh;niri;labwc;your-desktop-id'
+  -DHKCF_PORTAL_USE_IN='wlroots;Hyprland;sway;Wayfire;river;phosh;niri;labwc;umbriel;your-desktop-id'
 ```
 
 ## Portal Configuration
