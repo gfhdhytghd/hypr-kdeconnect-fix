@@ -16,7 +16,7 @@ include(CheckPIESupported)
 include(GNUInstallDirs)
 
 option(HKCF_ENABLE_HARDENING "Enable compiler and linker hardening flags" ON)
-set(HKCF_PORTAL_USE_IN "wlroots;Hyprland;sway;Wayfire;river;phosh;niri;labwc"
+set(HKCF_PORTAL_USE_IN "wlroots;Hyprland;sway;Wayfire;river;phosh;niri;labwc;umbriel"
   CACHE STRING "Semicolon-separated XDG_CURRENT_DESKTOP values where this portal backend should be visible"
 )
 
